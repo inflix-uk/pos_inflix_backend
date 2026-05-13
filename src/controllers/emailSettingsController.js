@@ -1,0 +1,247 @@
+const EmailSettings = require('../models/EmailSettings');
+const asyncHandler = require('../middleware/asyncHandler');
+const { getTenantIdFromReq } = require('../middleware/auth');
+const cache = require('../lib/cache');
+const TTL = require('../lib/cacheTTL');
+
+const EMAIL_SETTINGS_NS = 'settings:email';
+async function invalidateEmailSettingsCache(tenantId) {
+    await cache.bumpNs(EMAIL_SETTINGS_NS, tenantId);
+}
+
+// @desc    Get email settings
+// @route   GET /api/settings/email
+// @access  Private
+exports.getEmailSettings = asyncHandler(async (req, res) => {
+    const tenantId = getTenantIdFromReq(req);
+    const payload = await cache.cached(
+        { ns: EMAIL_SETTINGS_NS, tenantId, params: {}, ttlSec: TTL.REFERENCE },
+        async () => {
+            const settings = await EmailSettings.getSettings();
+            if (!settings) {
+                return { found: false };
+            }
+            // Mask password for security
+            const masked = {
+                ...settings.toObject(),
+                smtpPassword: settings.smtpPassword ? '********' : ''
+            };
+            return { found: true, data: masked };
+        }
+    );
+
+    if (!payload.found) {
+        return res.status(200).json({
+            success: true,
+            data: null,
+            message: 'No email settings configured'
+        });
+    }
+
+    res.status(200).json({
+        success: true,
+        data: payload.data
+    });
+});
+
+// @desc    Create or Update email settings
+// @route   POST /api/settings/email
+// @access  Private/Admin/Manager
+exports.saveEmailSettings = asyncHandler(async (req, res) => {
+    const {
+        smtpHost,
+        smtpPort,
+        smtpSecure,
+        smtpUsername,
+        smtpPassword,
+        fromEmail,
+        fromName,
+        replyToEmail,
+        replyToName,
+        enableEmailNotifications
+    } = req.body;
+
+    // Check if settings exist
+    let settings = await EmailSettings.findOne();
+
+    if (settings) {
+        // Update existing settings
+        const updateData = {
+            smtpHost,
+            smtpPort,
+            smtpSecure,
+            smtpUsername,
+            fromEmail,
+            fromName,
+            replyToEmail,
+            replyToName,
+            enableEmailNotifications,
+            updatedBy: req.user._id
+        };
+
+        // Only update password if provided and not masked
+        if (smtpPassword && smtpPassword !== '********') {
+            updateData.smtpPassword = smtpPassword;
+        }
+
+        settings = await EmailSettings.findByIdAndUpdate(
+            settings._id,
+            updateData,
+            {
+                new: true,
+                runValidators: true
+            }
+        );
+        await invalidateEmailSettingsCache(getTenantIdFromReq(req));
+
+        res.status(200).json({
+            success: true,
+            message: 'Email settings updated successfully',
+            data: {
+                ...settings.toObject(),
+                smtpPassword: '********'
+            }
+        });
+    } else {
+        // Create new settings
+        settings = await EmailSettings.create({
+            smtpHost,
+            smtpPort,
+            smtpSecure,
+            smtpUsername,
+            smtpPassword,
+            fromEmail,
+            fromName,
+            replyToEmail,
+            replyToName,
+            enableEmailNotifications,
+            createdBy: req.user._id
+        });
+        await invalidateEmailSettingsCache(getTenantIdFromReq(req));
+
+        res.status(201).json({
+            success: true,
+            message: 'Email settings created successfully',
+            data: {
+                ...settings.toObject(),
+                smtpPassword: '********'
+            }
+        });
+    }
+});
+
+// @desc    Update email settings
+// @route   PUT /api/settings/email
+// @access  Private/Admin/Manager
+exports.updateEmailSettings = asyncHandler(async (req, res) => {
+    let settings = await EmailSettings.findOne();
+
+    if (!settings) {
+        return res.status(404).json({
+            success: false,
+            message: 'Email settings not found. Please create settings first.'
+        });
+    }
+
+    const updateData = { ...req.body, updatedBy: req.user._id };
+
+    // Don't update password if it's masked
+    if (updateData.smtpPassword === '********') {
+        delete updateData.smtpPassword;
+    }
+
+    settings = await EmailSettings.findByIdAndUpdate(
+        settings._id,
+        updateData,
+        {
+            new: true,
+            runValidators: true
+        }
+    );
+    await invalidateEmailSettingsCache(getTenantIdFromReq(req));
+
+    res.status(200).json({
+        success: true,
+        message: 'Email settings updated successfully',
+        data: {
+            ...settings.toObject(),
+            smtpPassword: '********'
+        }
+    });
+});
+
+// @desc    Delete email settings
+// @route   DELETE /api/settings/email
+// @access  Private/Admin
+exports.deleteEmailSettings = asyncHandler(async (req, res) => {
+    const settings = await EmailSettings.findOne();
+
+    if (!settings) {
+        return res.status(404).json({
+            success: false,
+            message: 'Email settings not found'
+        });
+    }
+
+    await settings.deleteOne();
+    await invalidateEmailSettingsCache(getTenantIdFromReq(req));
+
+    res.status(200).json({
+        success: true,
+        message: 'Email settings deleted successfully'
+    });
+});
+
+// @desc    Test email settings
+// @route   POST /api/settings/email/test
+// @access  Private/Admin/Manager
+exports.testEmailSettings = asyncHandler(async (req, res) => {
+    const settings = await EmailSettings.findOne();
+
+    if (!settings) {
+        return res.status(404).json({
+            success: false,
+            message: 'Email settings not found. Please configure email settings first.'
+        });
+    }
+
+    const { testEmail } = req.body;
+
+    if (!testEmail) {
+        return res.status(400).json({
+            success: false,
+            message: 'Test email address is required'
+        });
+    }
+
+    // Here you would implement the actual email sending logic
+    // For now, we'll just return a success response
+    // In production, you would use nodemailer or similar
+
+    /*
+    const nodemailer = require('nodemailer');
+
+    const transporter = nodemailer.createTransport({
+        host: settings.smtpHost,
+        port: settings.smtpPort,
+        secure: settings.smtpSecure === 'ssl',
+        auth: {
+            user: settings.smtpUsername,
+            pass: settings.smtpPassword,
+        },
+    });
+
+    await transporter.sendMail({
+        from: `"${settings.fromName}" <${settings.fromEmail}>`,
+        to: testEmail,
+        subject: 'Test Email from POS System',
+        text: 'This is a test email to verify your email settings are working correctly.',
+        html: '<p>This is a test email to verify your email settings are working correctly.</p>',
+    });
+    */
+
+    res.status(200).json({
+        success: true,
+        message: `Test email would be sent to ${testEmail}. Note: Email sending not implemented in this demo.`
+    });
+});
