@@ -38,6 +38,7 @@ exports.getGeneralSettings = asyncHandler(async (req, res) => {
                 salesAutoSelectAccountEnabled: !!settings.salesAutoSelectAccountEnabled,
                 defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
                 retailModeEnabled: !!settings.retailModeEnabled,
+                allowNegativeStock: !!settings.allowNegativeStock,
                 updatedAtUtc: settings.updatedAt
             };
             if (settings.defaultSalesAccountId) {
@@ -155,6 +156,53 @@ exports.updateSalesMode = asyncHandler(async (req, res) => {
         salesAutoSelectAccountEnabled: !!settings.salesAutoSelectAccountEnabled,
         defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
         retailModeEnabled: !!settings.retailModeEnabled,
+        allowNegativeStock: !!settings.allowNegativeStock,
+        updatedAtUtc: settings.updatedAt
+    };
+    if (settings.defaultSalesAccountId) {
+        const account = await findActiveAccountById(settings.defaultSalesAccountId);
+        if (account) {
+            data.defaultAccount = { _id: account.doc._id.toString(), name: account.doc.name };
+        }
+    }
+    res.status(200).json({
+        success: true,
+        message: 'Settings updated',
+        data
+    });
+});
+
+// @desc    Update negative stock allowance (non-IMEI products)
+// @route   PUT /api/settings/general/negative-stock
+// @access  Private (settings.manage)
+exports.updateNegativeStock = asyncHandler(async (req, res) => {
+    const { allowNegativeStock } = req.body;
+    if (typeof allowNegativeStock !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'allowNegativeStock must be a boolean' });
+    }
+    let settings = await GeneralSettings.findOne();
+    if (!settings) {
+        settings = await GeneralSettings.create({});
+    }
+    const before = { allowNegativeStock: !!settings.allowNegativeStock };
+    settings.allowNegativeStock = allowNegativeStock;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    const after = { allowNegativeStock: !!settings.allowNegativeStock };
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-negative-stock',
+        success: true,
+        message: 'Negative stock allowance updated',
+        diffJson: { before, after }
+    });
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+    const data = {
+        salesAutoSelectAccountEnabled: !!settings.salesAutoSelectAccountEnabled,
+        defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
+        retailModeEnabled: !!settings.retailModeEnabled,
+        allowNegativeStock: !!settings.allowNegativeStock,
         updatedAtUtc: settings.updatedAt
     };
     if (settings.defaultSalesAccountId) {

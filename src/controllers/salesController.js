@@ -1224,7 +1224,8 @@ exports.createSale = asyncHandler(async (req, res) => {
     try {
         result = await transactionService.runWithTransaction(async (session) => {
             const saleResult = await salesTransactionService.createSaleInTransaction(session, saleData, {
-                userId: req.user?.id
+                userId: req.user?.id,
+                allowNegativeStock: !!generalSettings.allowNegativeStock
             });
             const auditStart = Date.now();
             await activityLogService.log({

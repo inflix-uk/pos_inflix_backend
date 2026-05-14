@@ -205,7 +205,8 @@ async function decrementProductQuantitiesWithSession(items, session, options = {
 }
 
 /** Decrement purchase item quantities in bulk (one bulkWrite with arrayFilters per purchase/item). */
-async function decrementPurchaseItemQuantitiesWithSession(items, session) {
+async function decrementPurchaseItemQuantitiesWithSession(items, session, options = {}) {
+    const { enforceNonNegative = false } = options;
     const suffix = '-no-imei';
     const byKey = new Map();
     for (const item of items) {
@@ -222,6 +223,32 @@ async function decrementPurchaseItemQuantitiesWithSession(items, session) {
     }
     if (byKey.size === 0) return;
     const mongoose = require('mongoose');
+
+    if (enforceNonNegative) {
+        const purchaseIds = [...new Set([...byKey.values()].map((v) => v.purchaseId))]
+            .map((id) => new mongoose.Types.ObjectId(id));
+        const purchases = await Purchase.find({ _id: { $in: purchaseIds } })
+            .session(session)
+            .select('items._id items.quantity items.name items.sku')
+            .lean();
+        const currentByKey = new Map();
+        for (const p of purchases) {
+            for (const it of (p.items || [])) {
+                currentByKey.set(`${p._id.toString()}\t${it._id.toString()}`, {
+                    qty: Number(it.quantity) || 0,
+                    name: it.name || it.sku || 'item'
+                });
+            }
+        }
+        for (const [key, { delta }] of byKey) {
+            const cur = currentByKey.get(key);
+            if (!cur) continue;
+            if (cur.qty - delta < 0) {
+                throw new Error(`Insufficient stock for "${cur.name}": has ${cur.qty}, need ${delta}`);
+            }
+        }
+    }
+
     const ops = [];
     for (const { purchaseId, itemId, delta } of byKey.values()) {
         ops.push({
@@ -242,7 +269,7 @@ async function decrementPurchaseItemQuantitiesWithSession(items, session) {
  * Serial numbers must not already be sold (caller should have validated; we re-check inside transaction for concurrency).
  */
 async function createSaleInTransaction(session, saleData, options = {}) {
-    const { userId = null } = options;
+    const { userId = null, allowNegativeStock = false } = options;
     const timing = { validationMs: 0, costResolutionMs: 0, saleWriteMs: 0, ledgerMs: 0, soldSerialMs: 0, decrementMs: 0 };
 
     let t0 = Date.now();
@@ -516,8 +543,8 @@ async function createSaleInTransaction(session, saleData, options = {}) {
     timing.soldSerialMs = Date.now() - t0;
 
     t0 = Date.now();
-    await decrementProductQuantitiesWithSession(saleData.items, session, { enforceNonNegative: false });
-    await decrementPurchaseItemQuantitiesWithSession(saleData.items, session);
+    await decrementProductQuantitiesWithSession(saleData.items, session, { enforceNonNegative: !allowNegativeStock });
+    await decrementPurchaseItemQuantitiesWithSession(saleData.items, session, { enforceNonNegative: !allowNegativeStock });
     timing.decrementMs = Date.now() - t0;
 
     return { sale, refLabel, timing };
