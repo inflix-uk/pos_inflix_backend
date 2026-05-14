@@ -7,6 +7,8 @@
 module.exports = {
     // Sales
     sales: { get: ['sale.view'], post: ['sale.create'], put: ['sale.edit'], delete: ['sale.void'] },
+    // Invoices (separate flow from sales — has its own model + permissions)
+    invoices: { get: ['invoice.view'], post: ['invoice.create'], put: ['invoice.edit'], delete: ['invoice.void'] },
     // Returns & refunds
     salesReturns: { get: ['return.create', 'refund.issue', 'sale.view'], post: ['return.create'], put: ['return.create', 'refund.issue'], delete: ['return.create', 'refund.issue'] },
     // Products

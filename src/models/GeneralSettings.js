@@ -20,6 +20,11 @@ const generalSettingsSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    /** When true, non-IMEI products can be sold even if stock would go negative. When false (default), sale is blocked if insufficient stock. */
+    allowNegativeStock: {
+        type: Boolean,
+        default: false
+    },
     updatedByUserId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

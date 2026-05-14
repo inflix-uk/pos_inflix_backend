@@ -14,6 +14,7 @@ const customerRoutes = require('./customerRoutes');
 const supplierRoutes = require('./supplierRoutes');
 const orderRoutes = require('./orderRoutes');
 const salesRoutes = require('./salesRoutes');
+const invoiceRoutes = require('./invoiceRoutes');
 const reportRoutes = require('./reportRoutes');
 const uploadRoutes = require('./uploadRoutes');
 const aboutSettingsRoutes = require('./aboutSettingsRoutes');
@@ -66,6 +67,7 @@ router.get('/', (req, res) => {
             suppliers: '/api/suppliers',
             orders: '/api/orders',
             sales: '/api/sales',
+            invoices: '/api/invoices',
             reports: '/api/reports',
             settings: '/api/settings/about',
             notesTerms: '/api/settings/notes-terms',
@@ -130,6 +132,7 @@ router.use('/customers', customerRoutes);
 router.use('/suppliers', supplierRoutes);
 router.use('/orders', orderRoutes);
 router.use('/sales', salesRoutes);
+router.use('/invoices', invoiceRoutes);
 router.use('/reports', reportRoutes);
 router.use('/upload', uploadRoutes);
 router.use('/settings/about', aboutSettingsRoutes);
