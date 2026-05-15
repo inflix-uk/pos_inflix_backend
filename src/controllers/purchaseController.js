@@ -1095,7 +1095,14 @@ function flattenPurchasesToStockRows(purchases, soldSet, opts) {
                     });
                 }
             } else {
-                const qty = Number(item.quantity) || 1;
+                // `Number(item.quantity) || 1` would render qty=0 as 1 (0 is falsy in JS),
+                // making sold-out non-serial items appear to still have one in stock.
+                const rawQty = Number(item.quantity);
+                const qty = Number.isFinite(rawQty) ? rawQty : 0;
+                const isSold = qty <= 0;
+                // Match serial behaviour: when statusFilter=available (skipSold=true),
+                // hide depleted non-serial lines instead of showing them with qty=0.
+                if (skipSold && isSold) continue;
                 rows.push({
                     ...base,
                     imei: '-',
@@ -1105,7 +1112,7 @@ function flattenPurchasesToStockRows(purchases, soldSet, opts) {
                     quantity: qty,
                     purchaseId: String(purchaseId),
                     itemId: String(itemId),
-                    _isSold: false
+                    _isSold: isSold
                 });
             }
         }

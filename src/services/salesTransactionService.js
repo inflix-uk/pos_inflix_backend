@@ -327,6 +327,53 @@ async function createSaleInTransaction(session, saleData, options = {}) {
             throw new Error(`Serial number(s) returned to supplier and not available to sell: ${blocked.join(', ')}`);
         }
     }
+    // Pre-flight non-serial stock check — must run BEFORE writing the Sale doc.
+    // On standalone Mongo we have no transaction, so if we save the Sale first and then
+    // discover insufficient stock during decrement, the half-written Sale stays in the DB.
+    // A retry with the same clientRequestId then matches the orphan via the idempotency
+    // check and incorrectly returns 200 success.
+    if (!allowNegativeStock) {
+        const byKey = new Map();
+        for (const it of (saleData.items || [])) {
+            const sku = (it.sku || '').trim();
+            if (!sku.endsWith(NO_IMEI_SUFFIX)) continue;
+            const prefix = sku.slice(0, -NO_IMEI_SUFFIX.length);
+            const firstDash = prefix.indexOf('-');
+            if (firstDash <= 0) continue;
+            const purchaseId = prefix.slice(0, firstDash);
+            const itemId = prefix.slice(firstDash + 1);
+            const qty = Math.max(0, Number(it.quantity) || 0);
+            if (qty === 0) continue;
+            const key = `${purchaseId}\t${itemId}`;
+            const prev = byKey.get(key) || { purchaseId, itemId, name: it.name, delta: 0 };
+            prev.delta += qty;
+            byKey.set(key, prev);
+        }
+        if (byKey.size > 0) {
+            const mongoose = require('mongoose');
+            const purchaseIds = [...new Set([...byKey.values()].map((v) => v.purchaseId))]
+                .map((id) => new mongoose.Types.ObjectId(id));
+            const q = Purchase.find({ _id: { $in: purchaseIds } }).select('items._id items.quantity items.name');
+            if (session) q.session(session);
+            const purchases = await q.lean();
+            const currentByKey = new Map();
+            for (const p of purchases) {
+                for (const it of (p.items || [])) {
+                    currentByKey.set(`${p._id.toString()}\t${it._id.toString()}`, {
+                        qty: Number(it.quantity) || 0,
+                        name: it.name
+                    });
+                }
+            }
+            for (const { purchaseId, itemId, name, delta } of byKey.values()) {
+                const cur = currentByKey.get(`${purchaseId}\t${itemId}`);
+                const has = cur ? cur.qty : 0;
+                if (has - delta < 0) {
+                    throw new Error(`Insufficient stock for "${(cur && cur.name) || name || 'item'}": has ${has}, need ${delta}`);
+                }
+            }
+        }
+    }
     timing.validationMs = Date.now() - t0;
 
     t0 = Date.now();
