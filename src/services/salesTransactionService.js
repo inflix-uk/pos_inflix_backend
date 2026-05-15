@@ -183,6 +183,10 @@ async function decrementProductQuantitiesWithSession(items, session, options = {
         const qty = Math.max(0, Number(item.quantity) || 0);
         if (qty === 0 || !item.sku) continue;
         const sku = String(item.sku).trim();
+        // Non-serial purchase-line SKUs (`<purchaseId>-<itemId>-no-imei`) have no Product record;
+        // their stock lives on Purchase.items.quantity and is decremented separately. Skip them
+        // here so the missing Product doesn't trigger a bogus "Insufficient stock" error.
+        if (sku.endsWith(NO_IMEI_SUFFIX)) continue;
         bySku.set(sku, (bySku.get(sku) || 0) + qty);
         if (Array.isArray(item.serialNumbers) && item.serialNumbers.length > 0) {
             serialSkus.add(sku);

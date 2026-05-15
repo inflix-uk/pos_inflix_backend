@@ -16,7 +16,11 @@ const activityLogService = require('../services/activityLogService');
 const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
 const metricsService = require('../services/metricsService');
-const { legacyFindInStockSerials } = require('./purchaseController');
+const {
+    legacyFindInStockSerials,
+    invalidateStockPurchasesCache,
+    invalidateStockSerialSetCache,
+} = require('./purchaseController');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
@@ -26,6 +30,10 @@ const TTL = require('../lib/cacheTTL');
 const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials'];
 async function invalidateSalesCaches(tenantId) {
     await cache.bumpMany(SALES_CACHE_NAMESPACES, tenantId);
+    // Inventory products page reads from SWR caches in purchaseController; without these,
+    // the non-serial qty stays stale (up to maxStaleMs) even though Purchase.items.quantity was decremented.
+    invalidateStockPurchasesCache?.(tenantId);
+    invalidateStockSerialSetCache?.(tenantId);
 }
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
@@ -1388,6 +1396,59 @@ exports.createSale = asyncHandler(async (req, res) => {
     }
     stockItemService.invalidateTypeaheadCache && stockItemService.invalidateTypeaheadCache(tenantId);
     require('./purchaseController').invalidateTypeaheadCache?.(tenantId);
+
+    // [Inventory snapshot] Print non-serial inventory state after this sale (per line):
+    //   purchased (original), sold (lifetime across active sales), remaining (current Purchase.items.quantity).
+    try {
+        const nonSerialLines = (saleData.items || []).filter(
+            (i) => i.purchaseId && i.purchaseItemId && !(Array.isArray(i.serialNumbers) && i.serialNumbers.length > 0)
+        );
+        if (nonSerialLines.length > 0) {
+            const mongoose = require('mongoose');
+            const lineKeys = nonSerialLines.map((i) => ({
+                purchaseId: String(i.purchaseId),
+                itemId: String(i.purchaseItemId),
+                sku: i.sku,
+                name: i.name,
+                soldThisSale: Number(i.quantity) || 0
+            }));
+            const purchaseIds = [...new Set(lineKeys.map((k) => k.purchaseId))]
+                .map((id) => new mongoose.Types.ObjectId(id));
+            const purchases = await Purchase.find({ _id: { $in: purchaseIds } })
+                .select('items._id items.quantity items.name')
+                .lean();
+            const remainingByKey = new Map();
+            for (const p of purchases) {
+                for (const it of (p.items || [])) {
+                    remainingByKey.set(`${p._id}\t${it._id}`, Number(it.quantity) || 0);
+                }
+            }
+            const skus = [...new Set(lineKeys.map((k) => k.sku))];
+            const soldAgg = await Sale.aggregate([
+                { $match: { tenantId, status: { $ne: 'voided' }, 'items.sku': { $in: skus } } },
+                { $unwind: '$items' },
+                { $match: { 'items.sku': { $in: skus } } },
+                { $group: { _id: '$items.sku', sold: { $sum: '$items.quantity' } } }
+            ]);
+            const soldBySku = new Map(soldAgg.map((r) => [r._id, Number(r.sold) || 0]));
+            const snapshot = lineKeys.map((k) => {
+                const remaining = remainingByKey.get(`${k.purchaseId}\t${k.itemId}`) ?? null;
+                const totalSold = soldBySku.get(k.sku) || 0;
+                const purchased = (remaining != null) ? remaining + totalSold : null;
+                return {
+                    name: k.name,
+                    sku: k.sku,
+                    purchased,
+                    soldTotal: totalSold,
+                    soldThisSale: k.soldThisSale,
+                    remaining
+                };
+            });
+            console.info('[Inventory after sale]', { reference: sale.reference, lines: snapshot });
+        }
+    } catch (err) {
+        console.warn('[Inventory after sale] snapshot failed:', err.message);
+    }
 
     await invalidateSalesCaches(tenantId);
     await cache.bumpNs('paymentAccounts:list', tenantId);
