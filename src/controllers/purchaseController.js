@@ -2860,10 +2860,12 @@ exports.salesTypeahead = asyncHandler(async (req, res) => {
         {
             $lookup: {
                 from: 'categories',
-                localField: 'items.category',
-                foreignField: '_id',
-                as: '_cat',
-                pipeline: [{ $project: { name: 1 } }]
+                let: { catId: '$items.category' },
+                pipeline: [
+                    { $match: { $expr: { $eq: ['$_id', '$$catId'] } } },
+                    { $project: { name: 1 } }
+                ],
+                as: '_cat'
             }
         },
         {

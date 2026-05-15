@@ -79,7 +79,11 @@ const saleSchema = new mongoose.Schema({
     voidedAtUtc: { type: Date, default: null },
     voidedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     voidReason: { type: String, trim: true, default: null },
-    note: { type: String, trim: true, default: '', maxlength: [2000, 'Note cannot exceed 2000 characters'] }
+    note: { type: String, trim: true, default: '', maxlength: [2000, 'Note cannot exceed 2000 characters'] },
+    /** Idempotency key supplied by the client for a single checkout attempt.
+     *  Lets the backend return the original sale when a network retry resends the same request,
+     *  instead of erroring with "Serial number(s) already sold". */
+    clientRequestId: { type: String, default: null, trim: true, maxlength: 64 }
 }, { timestamps: true, optimisticConcurrency: true });
 
 /** Format: INV-000001, INV-000002, ... (6-digit sequence) */
@@ -111,6 +115,12 @@ saleSchema.index({ tenantId: 1, status: 1, locationId: 1, createdAt: -1 });
 // reference already has unique index from schema definition
 // Covers customerName search
 saleSchema.index({ customerName: 1 });
+// Idempotency: prevent duplicate sales when client retries the same request (network glitch).
+// Sparse so legacy/unset documents don't collide on null.
+saleSchema.index(
+    { tenantId: 1, clientRequestId: 1 },
+    { unique: true, partialFilterExpression: { clientRequestId: { $type: 'string' } } }
+);
 
 /** Match only non-voided sales (for dashboards, lists, reporting). */
 saleSchema.statics.activeOnly = function () {

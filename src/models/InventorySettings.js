@@ -11,6 +11,11 @@ const inventorySettingsSchema = new mongoose.Schema({
         type: Number,
         default: 5,
         min: 0
+    },
+    /** When true, Create Sales shows inventory across ALL locations regardless of the selected location filter. When false (default), inventory is filtered to the selected location's items.sendTo only. */
+    syncAllLocations: {
+        type: Boolean,
+        default: false
     }
 }, {
     timestamps: true

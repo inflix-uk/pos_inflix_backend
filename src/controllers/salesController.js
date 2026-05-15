@@ -1082,6 +1082,25 @@ exports.createSale = asyncHandler(async (req, res) => {
     // [DEBUG] Inspect incoming items — particularly per-serial colour mapping
     console.log('[createSale] incoming items:', JSON.stringify(body.items, null, 2));
 
+    // Idempotency: if the client supplied a request id and a sale with that id already
+    // exists for this tenant, return it instead of trying to create a duplicate. This is
+    // what protects against the "Serial number(s) already sold" error when a network
+    // retry resends the same checkout.
+    const clientRequestId = (typeof body.clientRequestId === 'string' && body.clientRequestId.trim())
+        ? body.clientRequestId.trim().slice(0, 64)
+        : null;
+    if (clientRequestId) {
+        const existing = await Sale.findOne({ tenantId, clientRequestId }).select('_id reference').lean();
+        if (existing) {
+            return res.status(200).json({
+                success: true,
+                message: 'Sale already recorded (idempotent replay)',
+                data: { _id: existing._id.toString(), reference: existing.reference },
+                idempotent: true
+            });
+        }
+    }
+
     // Optional user-supplied invoice reference (custom invoice number). Empty → auto-generate.
     let customReference = '';
     if (body.reference != null && String(body.reference).trim() !== '') {
@@ -1107,6 +1126,7 @@ exports.createSale = asyncHandler(async (req, res) => {
         type: body.type,
         locationId: locationId,
         reference: customReference || undefined,
+        clientRequestId: clientRequestId || undefined,
         items: body.items.map((i) => {
             // Normalize serialColours (per-serial colour map): { [serial]: "BLUE" }
             // Frontend may send as plain object; coerce keys to trimmed strings.
@@ -1251,7 +1271,36 @@ exports.createSale = asyncHandler(async (req, res) => {
         });
     } catch (err) {
         const msg = err.message || 'Sale creation failed';
+        // Idempotency race: same clientRequestId arrived twice in parallel; the loser hits
+        // the unique index. Return the winning sale instead of bubbling the error up.
+        if (clientRequestId && err && err.code === 11000 && err.keyPattern && err.keyPattern.clientRequestId) {
+            const existing = await Sale.findOne({ tenantId, clientRequestId }).select('_id reference').lean();
+            if (existing) {
+                return res.status(200).json({
+                    success: true,
+                    message: 'Sale already recorded (idempotent replay)',
+                    data: { _id: existing._id.toString(), reference: existing.reference },
+                    idempotent: true
+                });
+            }
+        }
+        // Same idea for "already sold": if the client retried with the same idempotency key,
+        // surface the original sale instead of a confusing duplicate-serial error.
+        if (clientRequestId && msg.includes('already sold')) {
+            const existing = await Sale.findOne({ tenantId, clientRequestId }).select('_id reference').lean();
+            if (existing) {
+                return res.status(200).json({
+                    success: true,
+                    message: 'Sale already recorded (idempotent replay)',
+                    data: { _id: existing._id.toString(), reference: existing.reference },
+                    idempotent: true
+                });
+            }
+        }
         if (msg.includes('already sold')) {
+            return res.status(400).json({ success: false, message: msg });
+        }
+        if (msg.startsWith('Insufficient stock')) {
             return res.status(400).json({ success: false, message: msg });
         }
         if (err && err.code === 'REFERENCE_TAKEN') {
