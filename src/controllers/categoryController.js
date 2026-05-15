@@ -126,19 +126,23 @@ exports.getCategories = asyncHandler(async (req, res) => {
                             {
                                 $lookup: {
                                     from: VariantAttribute.collection.name,
-                                    localField: 'variantAttributes',
-                                    foreignField: '_id',
-                                    as: 'variantAttributes',
-                                    pipeline: [{ $project: { name: 1, slug: 1 } }]
+                                    let: { vaIds: { $ifNull: ['$variantAttributes', []] } },
+                                    pipeline: [
+                                        { $match: { $expr: { $in: ['$_id', '$$vaIds'] } } },
+                                        { $project: { name: 1, slug: 1 } }
+                                    ],
+                                    as: 'variantAttributes'
                                 }
                             },
                             {
                                 $lookup: {
                                     from: SubCategory.collection.name,
-                                    localField: '_id',
-                                    foreignField: 'category',
-                                    as: '_subs',
-                                    pipeline: [{ $count: 'n' }]
+                                    let: { catId: '$_id' },
+                                    pipeline: [
+                                        { $match: { $expr: { $eq: ['$category', '$$catId'] } } },
+                                        { $count: 'n' }
+                                    ],
+                                    as: '_subs'
                                 }
                             },
                             {

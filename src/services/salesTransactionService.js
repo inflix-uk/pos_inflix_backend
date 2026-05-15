@@ -175,22 +175,30 @@ async function getNextSaleReference(session) {
 async function decrementProductQuantitiesWithSession(items, session, options = {}) {
     const { enforceNonNegative = false } = options;
     const bySku = new Map();
+    // Items sold by serial number are IMEI-tracked: stock is guarded by the
+    // serial-level "already sold" check, not by the product.quantity field
+    // (which may legitimately be 0 even when serials are in stock).
+    const serialSkus = new Set();
     for (const item of items) {
         const qty = Math.max(0, Number(item.quantity) || 0);
         if (qty === 0 || !item.sku) continue;
         const sku = String(item.sku).trim();
         bySku.set(sku, (bySku.get(sku) || 0) + qty);
+        if (Array.isArray(item.serialNumbers) && item.serialNumbers.length > 0) {
+            serialSkus.add(sku);
+        }
     }
     if (bySku.size === 0) return;
     const skus = [...bySku.keys()];
-    const products = await Product.find({ sku: { $in: skus } }).session(session).select('sku quantity').lean();
-    const currentBySku = new Map(products.map((p) => [p.sku, Number(p.quantity) || 0]));
+    const products = await Product.find({ sku: { $in: skus } }).session(session).select('sku quantity name').lean();
+    const currentBySku = new Map(products.map((p) => [p.sku, { qty: Number(p.quantity) || 0, name: p.name || p.sku }]));
     const ops = [];
     for (const [sku, delta] of bySku) {
-        const current = currentBySku.get(sku) ?? 0;
+        const cur = currentBySku.get(sku) ?? { qty: 0, name: sku };
+        const current = cur.qty;
         const newQty = Math.max(0, current - delta);
-        if (enforceNonNegative && current - delta < 0) {
-            throw new Error(`Insufficient stock for SKU ${sku}: has ${current}, need ${delta}`);
+        if (enforceNonNegative && !serialSkus.has(sku) && current - delta < 0) {
+            throw new Error(`Insufficient stock for "${cur.name}": has ${current}, need ${delta}`);
         }
         ops.push({
             updateOne: {

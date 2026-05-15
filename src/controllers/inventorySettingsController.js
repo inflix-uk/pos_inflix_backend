@@ -39,9 +39,16 @@ exports.updateInventorySettings = asyncHandler(async (req, res) => {
     if (!settings) {
         settings = await InventorySettings.create({});
     }
-    const before = { defaultLowStockThreshold: settings.defaultLowStockThreshold, syncSalePriceToSameVariant: settings.syncSalePriceToSameVariant };
+    const before = {
+        defaultLowStockThreshold: settings.defaultLowStockThreshold,
+        syncSalePriceToSameVariant: settings.syncSalePriceToSameVariant,
+        syncAllLocations: settings.syncAllLocations
+    };
     if (typeof req.body.syncSalePriceToSameVariant === 'boolean') {
         settings.syncSalePriceToSameVariant = req.body.syncSalePriceToSameVariant;
+    }
+    if (typeof req.body.syncAllLocations === 'boolean') {
+        settings.syncAllLocations = req.body.syncAllLocations;
     }
     if (req.body.defaultLowStockThreshold !== undefined) {
         if (!can(req.user, 'settings.edit') && !can(req.user, 'inventory.settings.manage') && !can(req.user, 'product.edit')) {
@@ -62,6 +69,16 @@ exports.updateInventorySettings = asyncHandler(async (req, res) => {
             success: true,
             message: `Default low stock threshold changed to ${settings.defaultLowStockThreshold}`,
             diffJson: { old: before.defaultLowStockThreshold, new: settings.defaultLowStockThreshold }
+        });
+    }
+    if (before.syncAllLocations !== settings.syncAllLocations) {
+        await activityLogService.logFromReq(req, {
+            action: 'SYNC_ALL_LOCATIONS_UPDATED',
+            entityType: 'Inventory',
+            entityId: 'settings',
+            success: true,
+            message: `Create Sales inventory sync across all locations ${settings.syncAllLocations ? 'enabled' : 'disabled'}`,
+            diffJson: { old: before.syncAllLocations, new: settings.syncAllLocations }
         });
     }
     await invalidateInventorySettingsCache(getTenantIdFromReq(req));
