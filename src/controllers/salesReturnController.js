@@ -23,6 +23,10 @@ async function invalidateSalesReturnCaches(tenantId) {
     await cache.bumpNs('sales:list', tenantId);
     await cache.bumpNs('paymentAccounts:list', tenantId);
     await cache.bumpNs('customers:list', tenantId);
+    // Inventory products page reads from SWR caches in purchaseController; returns put stock back, so clear them.
+    const purchaseCtrl = require('./purchaseController');
+    purchaseCtrl.invalidateStockPurchasesCache?.(tenantId);
+    purchaseCtrl.invalidateStockSerialSetCache?.(tenantId);
 }
 
 const DEST_TO_SERIAL = { restock: 'in_stock', damaged: 'damaged', refurb: 'refurb', return_to_supplier: 'return_to_supplier' };
