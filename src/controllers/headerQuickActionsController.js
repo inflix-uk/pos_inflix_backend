@@ -9,7 +9,7 @@ async function invalidateHeaderQuickActionsCache(tenantId) {
     await cache.bumpNs(HEADER_QUICK_ACTIONS_NS, tenantId);
 }
 
-const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList'];
+const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList', 'showSalesOnline'];
 
 // @desc    Get header quick actions visibility
 // @route   GET /api/settings/header-quick-actions

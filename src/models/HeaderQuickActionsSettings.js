@@ -12,6 +12,7 @@ const headerQuickActionsSettingsSchema = new mongoose.Schema({
     showSalesModeToggle: { type: Boolean, default: true },
     showAccounts: { type: Boolean, default: true },
     showStockList: { type: Boolean, default: true },
+    showSalesOnline: { type: Boolean, default: true },
     updatedByUserId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
