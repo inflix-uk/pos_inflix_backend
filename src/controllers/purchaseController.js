@@ -2017,6 +2017,7 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
+    exports.invalidateStockPurchasesCache(tenantId);
     await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
 
     const updated = await Purchase.findOne({ _id: purchaseId, tenantId })
@@ -2111,6 +2112,7 @@ exports.deletePurchaseItem = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
+    exports.invalidateStockPurchasesCache(tenantId);
     await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
 
     const updated = await Purchase.findOne({ _id: purchaseId, tenantId })
