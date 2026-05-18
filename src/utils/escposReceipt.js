@@ -263,9 +263,19 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             case 'total': {
                 if (o.showTotal === false) break;
                 parts.push(line('--------------------------------'));
-                const total = sale.total != null ? Number(sale.total) : 0;
+                const subtotal = sale.subtotal != null ? Number(sale.subtotal) : 0;
+                const discount = sale.discount != null ? Number(sale.discount) : 0;
+                // sale.total is pre-discount in this codebase; final amount is total - discount (mirrors A4 / 80mm PDF).
+                const finalTotal = (sale.total != null ? Number(sale.total) : 0) - discount;
+                if (discount > 0) {
+                    parts.push(line(`Subtotal: ${subtotal.toFixed(2)}`));
+                    const lbl = sale.discountType === 'percent' && sale.discountValue
+                        ? `Discount (${Math.min(100, Number(sale.discountValue))}%):`
+                        : 'Discount:';
+                    parts.push(line(`${lbl} -${discount.toFixed(2)}`));
+                }
                 parts.push(boldOn());
-                parts.push(line(`Total: ${total.toFixed(2)}`));
+                parts.push(line(`Total: ${finalTotal.toFixed(2)}`));
                 parts.push(boldOff());
                 parts.push(line());
                 break;
