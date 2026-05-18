@@ -84,11 +84,20 @@ async function validateUniqueBarcodeAndImei(items, excludePurchaseId, tenantId) 
         if (inProduct) {
             return { valid: false, message: `Barcode "${inProduct.barcode}" already exists in products. Each barcode must be unique.` };
         }
+        // Allow reusing a barcode whose stock is fully depleted (items.quantity <= 0) — matches
+        // stock-view's "available" filter, otherwise users see "not in stock" but cannot reuse the barcode.
         const purchaseQuery = { tenantId: tid, 'items.barcode': { $in: uniqueBarcodes } };
         if (excludePurchaseId) purchaseQuery._id = { $ne: excludePurchaseId };
-        const existingBarcode = await Purchase.findOne(purchaseQuery).select('items.barcode').lean();
-        if (existingBarcode) {
-            const found = (existingBarcode.items || []).find((it) => it.barcode && uniqueBarcodes.includes(String(it.barcode).trim()));
+        const conflictingPurchases = await Purchase.find(purchaseQuery).select('items.barcode items.quantity items.isOtherItem').lean();
+        for (const p of conflictingPurchases) {
+            const found = (p.items || []).find((it) => {
+                if (!it.barcode || !uniqueBarcodes.includes(String(it.barcode).trim())) return false;
+                if (it.isOtherItem) {
+                    const q = Number(it.quantity);
+                    if (Number.isFinite(q) && q <= 0) return false; // depleted non-serial line — barcode is free
+                }
+                return true;
+            });
             if (found) {
                 return { valid: false, message: `Barcode "${found.barcode}" is already used in another parcel. Each barcode must be unique in the system.` };
             }
@@ -1738,6 +1747,7 @@ exports.createPurchase = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
+    exports.invalidateStockPurchasesCache(tenantId);
     await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
     // Populate the StockItem index for the new purchase (denormalized read model).
     stockItemService.rebuildForPurchase(populated).catch(() => {});

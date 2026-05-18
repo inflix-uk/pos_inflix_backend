@@ -26,7 +26,15 @@ const connectDB = async () => {
     try {
         const conn = await mongoose.connect(originalUri, {
             dbName: defaultDbName,
-            serverSelectionTimeoutMS: 8000
+            serverSelectionTimeoutMS: 8000,
+            // Recycle connections before the upstream LB silently kills them mid-flight.
+            maxIdleTimeMS: 30000,
+            socketTimeoutMS: 45000,
+            heartbeatFrequencyMS: 10000,
+            maxPoolSize: 20,
+            minPoolSize: 2,
+            retryWrites: true,
+            retryReads: true
         });
         console.log(`MongoDB Connected (default): ${conn.connection.host} | DB: ${defaultDbName}`);
     } catch (error) {
@@ -37,7 +45,14 @@ const connectDB = async () => {
             try {
                 const conn = await mongoose.connect(fallbackUri, {
                     dbName: defaultDbName,
-                    serverSelectionTimeoutMS: 8000
+                    serverSelectionTimeoutMS: 8000,
+                    maxIdleTimeMS: 30000,
+                    socketTimeoutMS: 45000,
+                    heartbeatFrequencyMS: 10000,
+                    maxPoolSize: 20,
+                    minPoolSize: 2,
+                    retryWrites: true,
+                    retryReads: true
                 });
                 console.log(`MongoDB Connected (standalone fallback): ${conn.connection.host} | DB: ${defaultDbName}`);
                 return;
