@@ -137,7 +137,7 @@ exports.createLocation = asyncHandler(async (req, res) => {
 
     // Omit empty strings for optional fields so validation doesn't fail
     const body = { ...req.body };
-    ['type', 'contactPerson', 'phone', 'email', 'address', 'city', 'postcode', 'country'].forEach((key) => {
+    ['type', 'contactPerson', 'phone', 'email', 'address', 'city', 'postcode', 'country', 'companyNumber', 'vatNumber'].forEach((key) => {
         if (body[key] === '' || body[key] == null) delete body[key];
     });
     if (!body.type) body.type = 'store';
@@ -213,7 +213,7 @@ exports.updateLocation = asyncHandler(async (req, res) => {
 
     // Omit empty strings for optional fields so validation doesn't fail
     const body = { ...req.body };
-    ['type', 'contactPerson', 'phone', 'email', 'address', 'city', 'postcode', 'country'].forEach((key) => {
+    ['type', 'contactPerson', 'phone', 'email', 'address', 'city', 'postcode', 'country', 'companyNumber', 'vatNumber'].forEach((key) => {
         if (body[key] === '' || body[key] == null) delete body[key];
     });
     if (!body.type) body.type = 'store';

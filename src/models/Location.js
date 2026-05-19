@@ -49,6 +49,16 @@ const locationSchema = new mongoose.Schema({
         trim: true,
         maxlength: [100, 'Country cannot exceed 100 characters']
     },
+    companyNumber: {
+        type: String,
+        trim: true,
+        maxlength: [50, 'Company number cannot exceed 50 characters']
+    },
+    vatNumber: {
+        type: String,
+        trim: true,
+        maxlength: [50, 'VAT number cannot exceed 50 characters']
+    },
     isActive: {
         type: Boolean,
         default: true
