@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const activityLogService = require('../services/activityLogService');
 const { buildReceiptEscpos } = require('../utils/escposReceipt');
+const { logoDataUrlToEscposRaster, escposQrCodeCommand } = require('../utils/escposGraphics');
 const { mergeReceiptPrinterSalesPrint } = require('../utils/receiptPrinterPrintOptions');
 const { variantAttributeSlugsOrderBySkuForSale } = require('../utils/printVariantAttributes');
 const { resolveLocationForPrint, getLocationPostalBlock } = require('../utils/printLocationHelper');
@@ -39,13 +40,28 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
         companyAddress = companyAddress ? `${companyAddress}\n${locationResult.fallbackLabel}` : locationResult.fallbackLabel;
     }
 
+    const salesPrint = mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint);
+    const ref = (sale.reference || '').trim() || String(sale._id || '');
+
+    let logoEscpos = null;
+    if (salesPrint.showLogo !== false && about && about.logo) {
+        logoEscpos = await logoDataUrlToEscposRaster(about.logo, salesPrint.paperWidthMm);
+    }
+
+    let qrEscpos = null;
+    if (salesPrint.showReceiptReferenceQr !== false && ref) {
+        qrEscpos = escposQrCodeCommand(ref, salesPrint.receiptReferenceQrSizeMm);
+    }
+
     const settings = {
         companyName,
         companyAddress,
         locationPhone,
         locationEmail,
         receiptTerms: (notesTerms && notesTerms.receiptPrinterSalesTerms) || '',
-        salesPrint: mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint)
+        salesPrint,
+        logoEscpos,
+        qrEscpos
     };
 
     const variantMap = await variantAttributeSlugsOrderBySkuForSale(sale, getTenantIdFromReq(req));

@@ -177,7 +177,7 @@ function receiptItemDescriptionLine(item, slugOrder) {
 
 /**
  * @param {Object} sale - Sale document (lean): reference, type, items[], subtotal, tax, total, discount, customerName, payments, previousBalance, amountDue, createdAt
- * @param {Object} settings - { companyName, companyAddress (string), receiptTerms (string), salesPrint?: object }
+ * @param {Object} settings - { companyName, companyAddress, receiptTerms, salesPrint?, logoEscpos?: Buffer, qrEscpos?: Buffer }
  * @param {Record<string, string[]>} [variantAttributeSlugsOrderBySku] - SKU → slugs in category order (invoice PDF parity)
  * @returns {Buffer} raw ESC/POS bytes
  */
@@ -225,8 +225,14 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
 
     for (const section of o.sectionOrder) {
         switch (section) {
-            case 'logo':
+            case 'logo': {
+                if (o.showLogo === false) break;
+                if (settings.logoEscpos && settings.logoEscpos.length) {
+                    parts.push(settings.logoEscpos);
+                    parts.push(line());
+                }
                 break;
+            }
             case 'shop_name': {
                 if (o.showShopName === false) break;
                 parts.push(alignCenter());
@@ -283,7 +289,17 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 break;
             }
             case 'reference_qr': {
-                /* PDF draws QR; ESC/POS has no bitmap QR here — section only advances order. */
+                if (o.showReceiptReferenceQr === false) break;
+                const qrPayload = ref || String(sale._id || '').trim();
+                if (!qrPayload) break;
+                if (settings.qrEscpos && settings.qrEscpos.length) {
+                    parts.push(settings.qrEscpos);
+                    parts.push(alignCenter());
+                    parts.push(line(qrPayload.slice(0, cols)));
+                    parts.push(alignLeft());
+                    parts.push(line());
+                    markMeta();
+                }
                 break;
             }
             case 'customer_name_address': {
