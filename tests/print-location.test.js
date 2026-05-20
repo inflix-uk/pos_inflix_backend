@@ -188,6 +188,8 @@ describe('Receipt ESC/POS uses location header', () => {
     const str = buffer.toString('utf8');
     expect(str).toContain('Payments');
     expect(str).toContain('Cash');
+    expect(str).toContain('Cash - GBP 10.00');
+    expect(str).not.toContain('\u2014');
     expect(str).toContain('GBP 10.00');
   });
 

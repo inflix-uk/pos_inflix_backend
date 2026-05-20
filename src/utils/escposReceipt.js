@@ -13,9 +13,18 @@ function cmd(...bytes) {
     return Buffer.from(bytes);
 }
 
+/** Strip/replace Unicode so CP437 thermal printers do not print mojibake (e.g. ΓÇö for em dash). */
+function escposSafeText(str) {
+    return String(str || '')
+        .replace(/\u2014/g, '-')
+        .replace(/\u2013/g, '-')
+        .replace(/\u00b7/g, ' - ')
+        .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '');
+}
+
 function text(str) {
     if (str == null || str === '') return Buffer.alloc(0);
-    return Buffer.from(String(str), 'utf8');
+    return Buffer.from(escposSafeText(str), 'ascii');
 }
 
 function line(str) {
@@ -135,7 +144,7 @@ function appendPaymentBreakdown(parts, sale, cols) {
         if (Number(p.bank) > 0) rows.push({ method: 'Bank', amount: p.bank });
         if (Number(p.credit) > 0) rows.push({ method: 'Balance to pay', amount: p.credit });
         for (const { method, amount } of rows) {
-            parts.push(line(`${method} — ${formatMoney(amount)}`.slice(0, cols)));
+            parts.push(line(`${method} - ${formatMoney(amount)}`.slice(0, cols)));
         }
         parts.push(line());
         return;
@@ -148,7 +157,7 @@ function appendPaymentBreakdown(parts, sale, cols) {
     parts.push(boldOn());
     parts.push(line('Payments'));
     parts.push(boldOff());
-    parts.push(line(`${label} — ${formatMoney(total)}`.slice(0, cols)));
+    parts.push(line(`${label} - ${formatMoney(total)}`.slice(0, cols)));
     parts.push(line());
 }
 
@@ -185,25 +194,25 @@ const SLUG_TO_SALE_FIELD = {
 function summaryItemName(item) {
     const name = String(item.name || '').trim();
     const colour = String(item.colour || '').trim();
-    if (!colour) return name || '—';
+    if (!colour) return name || '-';
     const escaped = colour.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return name.replace(new RegExp(`\\s*\\b${escaped}\\b\\s*`, 'gi'), ' ').replace(/\s+/g, ' ').trim() || name || '—';
+    return name.replace(new RegExp(`\\s*\\b${escaped}\\b\\s*`, 'gi'), ' ').replace(/\s+/g, ' ').trim() || name || '-';
 }
 
 function itemsSummaryLineWithGrade(item) {
     const base = summaryItemName(item);
     const g = String(item.grade || '').trim();
-    if (!g) return base || '—';
+    if (!g) return base || '-';
     const upper = base.toUpperCase();
     const gUp = g.toUpperCase();
     if (
         upper.endsWith(` ${gUp}`) ||
-        upper.endsWith(` · ${gUp}`) ||
+        upper.endsWith(` - ${gUp}`) ||
         new RegExp(`\\b${gUp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(upper)
     ) {
         return base;
     }
-    return `${base} · ${g}`.trim();
+    return `${base} - ${g}`.trim();
 }
 
 function saleItemValueForSlug(item, slug) {
@@ -215,7 +224,7 @@ function saleItemValueForSlug(item, slug) {
 }
 
 function appendOrderedAttributes(baseLine, slugOrder, getValue) {
-    const nm = String(baseLine || '').trim() || '—';
+    const nm = String(baseLine || '').trim() || '-';
     const parts = [];
     for (const slug of slugOrder) {
         const v = getValue(slug);
@@ -225,11 +234,11 @@ function appendOrderedAttributes(baseLine, slugOrder, getValue) {
     const nmUp = nm.toUpperCase();
     const extra = parts.filter((p) => !nmUp.includes(String(p).toUpperCase()));
     if (extra.length === 0) return nm;
-    return `${nm} · ${extra.join(' · ')}`;
+    return `${nm} - ${extra.join(' - ')}`;
 }
 
 function receiptItemDescriptionLine(item, slugOrder) {
-    const nm = summaryItemName(item).trim() || String(item.name || '').trim() || '—';
+    const nm = summaryItemName(item).trim() || String(item.name || '').trim() || '-';
     if (!slugOrder || !slugOrder.length) return itemsSummaryLineWithGrade(item);
     const out = appendOrderedAttributes(nm, slugOrder, (slug) => saleItemValueForSlug(item, slug));
     if (out === nm) return itemsSummaryLineWithGrade(item);
