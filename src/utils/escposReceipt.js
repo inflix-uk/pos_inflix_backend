@@ -167,10 +167,13 @@ function appendPaymentBreakdown(parts, sale, cols) {
     parts.push(line());
 }
 
-/** ESC p — pulse cash drawer (pin 0 = drawer kick connector on most Epson/Star). */
-function drawerKick(pin = 0, onTime = 25, offTime = 250) {
+/** ESC p + real-time pulse (pin 0 = drawer kick connector on most Epson/Star). */
+function drawerKick(pin = 0, onTime = 60, offTime = 120) {
     const m = pin === 1 ? 1 : 0;
-    return cmd(ESC, 0x70, m, onTime & 0xff, offTime & 0xff);
+    return Buffer.concat([
+        cmd(ESC, 0x70, m, onTime & 0xff, offTime & 0xff),
+        cmd(0x10, 0x14, 0x01, m, 0x19)
+    ]);
 }
 
 function saleHasCashPayment(sale) {
