@@ -5,7 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const activityLogService = require('../services/activityLogService');
 const { buildReceiptEscpos } = require('../utils/escposReceipt');
-const { logoDataUrlToEscposRaster, escposQrCodeCommand } = require('../utils/escposGraphics');
+const { qrTextToEscposRaster } = require('../utils/escposGraphics');
 const { mergeReceiptPrinterSalesPrint } = require('../utils/receiptPrinterPrintOptions');
 const { variantAttributeSlugsOrderBySkuForSale } = require('../utils/printVariantAttributes');
 const { resolveLocationForPrint, getLocationPostalBlock } = require('../utils/printLocationHelper');
@@ -43,14 +43,12 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
     const salesPrint = mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint);
     const ref = (sale.reference || '').trim() || String(sale._id || '');
 
-    let logoEscpos = null;
-    if (salesPrint.showLogo !== false && about && about.logo) {
-        logoEscpos = await logoDataUrlToEscposRaster(about.logo, salesPrint.paperWidthMm);
-    }
+    // Logo omitted on silent ESC/POS — raster logos print as garbage on many Windows RAW drivers.
+    const logoEscpos = null;
 
     let qrEscpos = null;
     if (salesPrint.showReceiptReferenceQr !== false && ref) {
-        qrEscpos = escposQrCodeCommand(ref, salesPrint.receiptReferenceQrSizeMm);
+        qrEscpos = await qrTextToEscposRaster(ref, salesPrint.receiptReferenceQrSizeMm);
     }
 
     const settings = {

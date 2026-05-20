@@ -174,7 +174,7 @@ describe('Receipt ESC/POS uses location header', () => {
     const str = buffer.toString('utf8');
     expect(str).toContain('Payments');
     expect(str).toContain('Cash');
-    expect(str).toContain('£10.00');
+    expect(str).toContain('GBP 10.00');
   });
 
   it('uses full-width dividers for 80mm paper', () => {

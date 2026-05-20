@@ -1,7 +1,8 @@
 /**
- * ESC/POS bitmap logo (GS v 0) and native QR (GS ( k) for thermal receipts.
+ * ESC/POS raster graphics for thermal receipts (QR as bitmap; logo disabled in print controller).
  */
 const sharp = require('sharp');
+const QRCode = require('qrcode');
 
 const ESC = 0x1b;
 const GS = 0x1d;
@@ -75,28 +76,35 @@ async function logoDataUrlToEscposRaster(dataUrl, paperWidthMm = 80) {
 }
 
 /**
- * Epson/Star-style QR (model 2) — encodes sale reference or id string.
+ * QR as GS v 0 raster (works on printers that garble native GS ( k commands).
  * @param {string} text
- * @param {number} qrSizeMm — from receiptReferenceQrSizeMm (14–30)
- * @returns {Buffer|null}
+ * @param {number} qrSizeMm
+ * @returns {Promise<Buffer|null>}
  */
-function escposQrCodeCommand(text, qrSizeMm = 22) {
+async function qrTextToEscposRaster(text, qrSizeMm = 22) {
     const payload = String(text || '').trim();
     if (!payload) return null;
-    const data = Buffer.from(payload, 'utf8');
-    const moduleSize = qrSizeMm >= 26 ? 8 : qrSizeMm >= 22 ? 6 : qrSizeMm >= 18 ? 5 : 4;
-    const storeLen = data.length + 3;
-    const store = Buffer.concat([
-        cmd(GS, 0x28, 0x6b, storeLen & 0xff, (storeLen >> 8) & 0xff, 0x31, 0x50, moduleSize, 0x31),
-        data
-    ]);
-    const print = cmd(GS, 0x28, 0x6b, 0x03, 0x00, 0x31, 0x51, 0x30);
-    return Buffer.concat([cmd(ESC, 0x61, 1), store, print, cmd(LF, LF), cmd(ESC, 0x61, 0)]);
+    const mm = Number(qrSizeMm) || 22;
+    const dots = Math.min(280, Math.max(120, Math.round((mm / 25.4) * 203)));
+    try {
+        const png = await QRCode.toBuffer(payload, {
+            type: 'png',
+            width: dots,
+            margin: 1,
+            errorCorrectionLevel: 'M'
+        });
+        const { data, info } = await sharp(png).greyscale().threshold(128).raw().toBuffer({ resolveWithObject: true });
+        const raster = packRasterGsV0(data, info.width, info.height);
+        return Buffer.concat([cmd(ESC, 0x61, 1), raster, cmd(LF, LF), cmd(ESC, 0x61, 0)]);
+    } catch (e) {
+        console.warn('[escposGraphics] QR raster failed:', e.message);
+        return null;
+    }
 }
 
 module.exports = {
     logoDataUrlToEscposRaster,
-    escposQrCodeCommand,
+    qrTextToEscposRaster,
     parseDataUrl,
     packRasterGsV0
 };

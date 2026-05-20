@@ -74,6 +74,7 @@ function printerInit(paperWidthMm) {
     const nH = (dots >> 8) & 0xff;
     return Buffer.concat([
         init(),
+        cmd(ESC, 0x74, 0), // CP437 — safe for ASCII text on most thermal printers
         cmd(ESC, 0x4d, 0), // Font A (48 cols on 80mm)
         cmd(GS, 0x4c, 0, 0), // GS L — left margin 0
         cmd(GS, 0x28, 0x57, 0x02, 0x00, 0x02, nL, nH), // GS ( W — print area width (dots)
@@ -91,10 +92,11 @@ function pushCenteredLines(parts, lines, maxChars) {
     parts.push(alignLeft());
 }
 
+/** ASCII-safe amounts (UTF-8 £ often prints as ú on thermal drivers). */
 function formatMoney(n) {
     const v = Number(n);
-    if (!Number.isFinite(v)) return '£0.00';
-    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 2 }).format(v);
+    if (!Number.isFinite(v)) return 'GBP 0.00';
+    return `GBP ${v.toFixed(2)}`;
 }
 
 /** Date only (matches 80mm PDF ref/date row). */
