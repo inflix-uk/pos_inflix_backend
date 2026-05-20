@@ -117,6 +117,10 @@ const DEFAULT_SALES = {
     showTotal: true,
     showTermsText: true,
     showThankYou: true,
+    /** Pulse cash drawer on ESC/POS when sale includes cash payment. */
+    openCashDrawerOnCashPayment: true,
+    /** 0 = pin 2 (most printers); 1 = pin 5 if drawer does not open on pin 0. */
+    cashDrawerPin: 0,
     showReceiptReferenceQr: true,
     receiptReferenceQrSizeMm: 22,
     sectionOrder: normalizeSalesReceiptSectionOrder(null),
@@ -155,7 +159,11 @@ function mergeReceiptPrinterSalesPrint(partial) {
             14,
             30,
             d.receiptReferenceQrSizeMm
-        )
+        ),
+        openCashDrawerOnCashPayment: p.openCashDrawerOnCashPayment !== false,
+        cashDrawerPin: p.cashDrawerPin === 1 ? 1 : 0,
+        paperWidthMm: clamp(p.paperWidthMm != null ? Number(p.paperWidthMm) : d.paperWidthMm, 58, 80, d.paperWidthMm),
+        sideMarginMm: clamp(p.sideMarginMm != null ? Number(p.sideMarginMm) : d.sideMarginMm, 2, 8, d.sideMarginMm)
     };
 }
 

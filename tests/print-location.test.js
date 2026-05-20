@@ -9,7 +9,7 @@ const mongoose = require('mongoose');
 const Location = require('../src/models/Location');
 const Sale = require('../src/models/Sale');
 const { resolveLocationForPrint, getLocationAddressBlock, getLocationAddressLines } = require('../src/utils/printLocationHelper');
-const { buildReceiptEscpos } = require('../src/utils/escposReceipt');
+const { buildReceiptEscpos, drawerKick, lineCharsForPaper, dividerLine } = require('../src/utils/escposReceipt');
 const printController = require('../src/controllers/printController');
 
 describe('printLocationHelper', () => {
@@ -127,6 +127,63 @@ describe('Receipt ESC/POS uses location header', () => {
     const str = buffer.toString('utf8');
     expect(str).toContain('Branch Manchester');
     expect(str).toContain('1 High Street');
+  });
+
+  it('includes cash drawer kick bytes for cash retail sales', () => {
+    const sale = {
+      reference: 'INV-CASH',
+      type: 'retail',
+      paymentMethod: 'cash',
+      items: [{ name: 'Item', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
+    const kick = drawerKick(0);
+    expect(buffer.indexOf(kick)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('uses full-width dividers for 80mm paper', () => {
+    expect(lineCharsForPaper(80)).toBe(48);
+    expect(dividerLine(48).length).toBe(48);
+    const sale = {
+      reference: 'INV-001',
+      type: 'retail',
+      paymentMethod: 'card',
+      items: [{ name: 'Cable', price: 7.99, quantity: 1 }],
+      total: 7.99,
+      subtotal: 7.99,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, {
+      companyName: 'Shop',
+      companyAddress: '1 High Street',
+      salesPrint: { paperWidthMm: 80 }
+    });
+    const str = buffer.toString('utf8');
+    expect(str).toContain(dividerLine(48));
+  });
+
+  it('does not include drawer kick for card-only sales', () => {
+    const sale = {
+      reference: 'INV-CARD',
+      type: 'retail',
+      paymentMethod: 'card',
+      items: [{ name: 'Item', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
+    const kick = drawerKick(0);
+    expect(buffer.indexOf(kick)).toBe(-1);
   });
 });
 

@@ -46,6 +46,65 @@ function cut() {
     return cmd(GS, 0x56, 0); // GS V 0 (full cut)
 }
 
+/** Characters per line for Font A (12×24) by paper width — matches 80mm PDF layout. */
+function lineCharsForPaper(paperWidthMm) {
+    const w = Number(paperWidthMm);
+    if (!Number.isFinite(w) || w <= 0) return 48;
+    if (w <= 58) return 32;
+    if (w <= 72) return 42;
+    return 48;
+}
+
+function dividerLine(cols) {
+    return '-'.repeat(Math.max(8, cols));
+}
+
+function feedLines(n) {
+    const count = Math.max(0, Math.min(12, n));
+    const bytes = new Array(count).fill(LF);
+    return cmd(...bytes);
+}
+
+/** Font A, full print area, zero left margin (80mm thermal). */
+function printerInit(paperWidthMm) {
+    const mm = Number(paperWidthMm) || 80;
+    const printableMm = mm <= 58 ? 48 : mm <= 72 ? 64 : 72;
+    const dots = Math.min(576, Math.max(384, Math.round((printableMm / 25.4) * 203)));
+    const nL = dots & 0xff;
+    const nH = (dots >> 8) & 0xff;
+    return Buffer.concat([
+        init(),
+        cmd(ESC, 0x4d, 0), // Font A (48 cols on 80mm)
+        cmd(GS, 0x4c, 0, 0), // GS L — left margin 0
+        cmd(GS, 0x28, 0x57, 0x02, 0x00, 0x02, nL, nH), // GS ( W — print area width (dots)
+        cmd(ESC, 0x32) // default line spacing
+    ]);
+}
+
+function pushCenteredLines(parts, lines, maxChars) {
+    const rows = (lines || []).map((l) => String(l || '').trim()).filter(Boolean);
+    if (!rows.length) return;
+    parts.push(alignCenter());
+    for (const row of rows) {
+        parts.push(line(row.slice(0, maxChars)));
+    }
+    parts.push(alignLeft());
+}
+
+/** ESC p — pulse cash drawer (pin 0 = drawer kick connector on most Epson/Star). */
+function drawerKick(pin = 0, onTime = 25, offTime = 250) {
+    const m = pin === 1 ? 1 : 0;
+    return cmd(ESC, 0x70, m, onTime & 0xff, offTime & 0xff);
+}
+
+function saleHasCashPayment(sale) {
+    if (!sale) return false;
+    if (String(sale.paymentMethod || '').toLowerCase() === 'cash') return true;
+    const payments = sale.payments;
+    if (payments && Number(payments.cash) > 0) return true;
+    return false;
+}
+
 /** Match frontend invoicePrint SLUG_TO_SALE_FIELD (sale line flat fields). */
 const SLUG_TO_SALE_FIELD = {
     grade: 'grade',
@@ -130,6 +189,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
     const locationEmail = (settings && settings.locationEmail) || '';
     const receiptTerms = (settings && settings.receiptTerms) || '';
     const o = mergeReceiptPrinterSalesPrint((settings && settings.salesPrint) || {});
+    const cols = lineCharsForPaper(o.paperWidthMm);
 
     const ref = (sale.reference || '').trim();
     const dateStr = sale.createdAt
@@ -151,12 +211,17 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
     const drawDividerBeforeItems = () => {
         if (dividerBeforeItemsDone) return;
         if (hasMetaForDivider || willPrintItems) {
-            parts.push(line('--------------------------------'));
+            parts.push(line(dividerLine(cols)));
             dividerBeforeItemsDone = true;
         }
     };
 
-    parts.push(init());
+    parts.push(printerInit(o.paperWidthMm));
+
+    if (o.openCashDrawerOnCashPayment !== false && saleHasCashPayment(sale)) {
+        const pin = o.cashDrawerPin === 1 ? 1 : 0;
+        parts.push(drawerKick(pin));
+    }
 
     for (const section of o.sectionOrder) {
         switch (section) {
@@ -166,7 +231,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 if (o.showShopName === false) break;
                 parts.push(alignCenter());
                 parts.push(boldOn());
-                parts.push(line(companyName.slice(0, 42)));
+                parts.push(line(companyName.slice(0, cols)));
                 parts.push(boldOff());
                 parts.push(alignLeft());
                 parts.push(line());
@@ -174,16 +239,18 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             }
             case 'shop_address': {
                 if (o.showShopAddress === false || !companyAddress) break;
-                companyAddress.split('\n').slice(0, 6).forEach((l) => {
-                    parts.push(line(l.trim().slice(0, 48)));
-                });
+                pushCenteredLines(
+                    parts,
+                    companyAddress.split('\n').slice(0, 6),
+                    cols
+                );
                 parts.push(line());
                 break;
             }
             case 'location_phone': {
                 if (o.showLocationPhone === false || !String(locationPhone).trim()) break;
                 parts.push(alignCenter());
-                parts.push(line(`Tel: ${String(locationPhone).trim().slice(0, 36)}`));
+                parts.push(line(`Tel: ${String(locationPhone).trim().slice(0, cols - 5)}`));
                 parts.push(alignLeft());
                 parts.push(line());
                 markMeta();
@@ -192,7 +259,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             case 'location_email': {
                 if (o.showLocationEmail === false || !String(locationEmail).trim()) break;
                 parts.push(alignCenter());
-                parts.push(line(String(locationEmail).trim().slice(0, 48)));
+                parts.push(line(String(locationEmail).trim().slice(0, cols)));
                 parts.push(alignLeft());
                 parts.push(line());
                 markMeta();
@@ -223,20 +290,20 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 if (o.showCustomerNameAndAddress === false) break;
                 parts.push(line(sale.customerName || 'Walk-in'));
                 if (sale.customerAddress && String(sale.customerAddress).trim()) {
-                    parts.push(line(String(sale.customerAddress).trim().replace(/\n/g, ', ').slice(0, 48)));
+                    parts.push(line(String(sale.customerAddress).trim().replace(/\n/g, ', ').slice(0, cols)));
                 }
                 markMeta();
                 break;
             }
             case 'customer_phone': {
                 if (o.showCustomerPhone === false || !sale.customerPhone || !String(sale.customerPhone).trim()) break;
-                parts.push(line(`Tel: ${String(sale.customerPhone).trim().slice(0, 36)}`));
+                parts.push(line(`Tel: ${String(sale.customerPhone).trim().slice(0, cols - 5)}`));
                 markMeta();
                 break;
             }
             case 'customer_email': {
                 if (o.showCustomerEmail === false || !sale.customerEmail || !String(sale.customerEmail).trim()) break;
-                parts.push(line(String(sale.customerEmail).trim().slice(0, 48)));
+                parts.push(line(String(sale.customerEmail).trim().slice(0, cols)));
                 markMeta();
                 break;
             }
@@ -246,9 +313,9 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 (sale.items || []).forEach((item) => {
                     const slugOrder = item.sku ? variantAttributeSlugsOrderBySku[item.sku] : undefined;
                     const desc = receiptItemDescriptionLine(item, slugOrder);
-                    parts.push(line(desc.slice(0, 48)));
+                    parts.push(line(desc.slice(0, cols)));
                     if (o.showItemSerials !== false && item.serialNumbers && item.serialNumbers.length > 0) {
-                        parts.push(line(`IMEI: ${item.serialNumbers.join(', ').slice(0, 36)}`));
+                        parts.push(line(`IMEI: ${item.serialNumbers.join(', ').slice(0, cols - 6)}`));
                     }
                     const qty = item.quantity || 1;
                     const price = item.price != null ? Number(item.price) : 0;
@@ -262,7 +329,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             }
             case 'total': {
                 if (o.showTotal === false) break;
-                parts.push(line('--------------------------------'));
+                parts.push(line(dividerLine(cols)));
                 const subtotal = sale.subtotal != null ? Number(sale.subtotal) : 0;
                 const discount = sale.discount != null ? Number(sale.discount) : 0;
                 // sale.total is pre-discount in this codebase; final amount is total - discount (mirrors A4 / 80mm PDF).
@@ -274,17 +341,17 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                         : 'Discount:';
                     parts.push(line(`${lbl} -${discount.toFixed(2)}`));
                 }
+                parts.push(alignCenter());
                 parts.push(boldOn());
                 parts.push(line(`Total: ${finalTotal.toFixed(2)}`));
                 parts.push(boldOff());
+                parts.push(alignLeft());
                 parts.push(line());
                 break;
             }
             case 'terms': {
                 if (o.showTermsText === false || !receiptTerms) break;
-                receiptTerms.split('\n').forEach((l) => {
-                    parts.push(line(l.trim().slice(0, 48)));
-                });
+                pushCenteredLines(parts, receiptTerms.split('\n').slice(0, 8), cols);
                 parts.push(line());
                 break;
             }
@@ -300,9 +367,16 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
         }
     }
 
+    parts.push(feedLines(5));
     parts.push(cut());
 
     return Buffer.concat(parts);
 }
 
-module.exports = { buildReceiptEscpos };
+module.exports = {
+    buildReceiptEscpos,
+    saleHasCashPayment,
+    drawerKick,
+    lineCharsForPaper,
+    dividerLine
+};
