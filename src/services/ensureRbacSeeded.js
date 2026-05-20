@@ -35,6 +35,7 @@ const PERMISSIONS = [
     { key: 'parcel.status_change', description: 'Change parcel status', group: 'Parcels' },
     { key: 'report.view', description: 'View reports', group: 'Reports' },
     { key: 'report.export', description: 'Export reports', group: 'Reports' },
+    { key: 'report.zread', description: 'View Daily Closing Till Reading (Z-Read) dashboard', group: 'Reports' },
     { key: 'user.manage', description: 'Manage users', group: 'Admin' },
     { key: 'role.manage', description: 'Manage roles', group: 'Admin' },
     { key: 'audit.view', description: 'View activity log', group: 'Admin' },
@@ -80,7 +81,18 @@ const PERMISSIONS = [
     { key: 'inventory.print_labels', description: 'Print QR/labels (products, serials, locations)', group: 'Inventory' }
 ];
 
+/**
+ * Upsert all permissions in the catalog.
+ * Returns true if any permission was newly inserted (caller can invalidate caches).
+ */
 async function ensurePermissions() {
+    // Check which catalog keys are missing before upserting, so we can report whether
+    // anything actually got inserted (Mongoose 8 dropped rawResult; this is portable).
+    const catalogKeys = PERMISSIONS.map((p) => p.key);
+    const existing = await Permission.find({ key: { $in: catalogKeys } }).select('key').lean();
+    const existingKeys = new Set(existing.map((p) => p.key));
+    const willInsert = catalogKeys.some((k) => !existingKeys.has(k));
+
     // Parallel upserts — sequential awaits used to dominate Admin page load time over a slow DB.
     await Promise.all(
         PERMISSIONS.map((p) =>
@@ -91,6 +103,7 @@ async function ensurePermissions() {
             )
         )
     );
+    return willInsert;
 }
 
 async function getPermissionIdsByKeys(keys) {
@@ -167,8 +180,9 @@ let ensurePromise = null;
 function ensure() {
     if (ensurePromise) return ensurePromise;
     ensurePromise = (async () => {
-        await ensurePermissions();
+        const inserted = await ensurePermissions();
         await ensureRoles();
+        return { permissionsInserted: inserted };
     })().catch((err) => {
         ensurePromise = null;
         throw err;

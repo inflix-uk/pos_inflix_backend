@@ -13,7 +13,7 @@ router.use(requireFeature('reports'));
 router.get('/dashboard/summary', requirePermission('report.view'), getSummary);
 router.get('/dashboard/by-location', requirePermission('report.view'), getByLocation);
 router.get('/dashboard/legacy-count', requirePermission('report.view'), getLegacyCount);
-router.get('/takings-dashboard', requirePermission('report.view'), getTakingsDashboard);
+router.get('/takings-dashboard', requirePermission('report.view', 'report.zread'), getTakingsDashboard);
 router.get('/inventory', requirePermission('report.view', 'stock.view'), getInventoryReport);
 
 // DISABLED: Order model has no tenantId — would leak cross-tenant. Re-enable after adding tenantId to Order and patching handlers.
