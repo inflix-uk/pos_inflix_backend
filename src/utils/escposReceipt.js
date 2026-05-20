@@ -244,7 +244,9 @@ function receiptItemDescriptionLine(item, slugOrder) {
  */
 function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}) {
     const parts = [];
-    const companyName = (settings && settings.companyName) || 'Company';
+    const shopName = String(
+        (settings && (settings.shopDisplayName || settings.companyName)) || 'Company'
+    ).trim() || 'Company';
     const companyAddress = (settings && settings.companyAddress) || '';
     const locationPhone = (settings && settings.locationPhone) || '';
     const locationEmail = (settings && settings.locationEmail) || '';
@@ -290,7 +292,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 if (o.showShopName === false) break;
                 parts.push(alignCenter());
                 parts.push(boldOn());
-                parts.push(line(companyName.slice(0, cols)));
+                parts.push(line(shopName.slice(0, cols)));
                 parts.push(boldOff());
                 parts.push(alignLeft());
                 parts.push(line());

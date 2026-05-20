@@ -24,7 +24,10 @@ const SALES_RECEIPT_SECTION_IDS = [
 const SALES_SECTION_SET = new Set(SALES_RECEIPT_SECTION_IDS);
 
 function resolveShopVisibility(p) {
-    if (p.showShopHeader === false) {
+    const nameSet = typeof p.showShopName === 'boolean';
+    const addrSet = typeof p.showShopAddress === 'boolean';
+    /** Legacy showShopHeader only applies when per-field toggles were never saved. */
+    if (p.showShopHeader === false && !nameSet && !addrSet) {
         return { showShopName: false, showShopAddress: false };
     }
     return {

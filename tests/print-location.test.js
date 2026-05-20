@@ -106,6 +106,20 @@ describe('printLocationHelper', () => {
   });
 });
 
+describe('resolveShopVisibility (receipt print)', () => {
+    const { mergeReceiptPrinterSalesPrint } = require('../src/utils/receiptPrinterPrintOptions');
+
+    it('keeps shop name when showShopHeader is false but showShopName is true', () => {
+        const o = mergeReceiptPrinterSalesPrint({
+            showShopHeader: false,
+            showShopName: true,
+            showShopAddress: true
+        });
+        expect(o.showShopName).toBe(true);
+        expect(o.showShopAddress).toBe(true);
+    });
+});
+
 describe('normalizeSalesReceiptSectionOrder', () => {
     it('places reference_qr before thank_you (footer QR)', () => {
         const order = normalizeSalesReceiptSectionOrder(['logo', 'ref_date', 'reference_qr', 'items', 'total', 'thank_you']);

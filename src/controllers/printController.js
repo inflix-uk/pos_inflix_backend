@@ -27,18 +27,22 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
         resolveLocationForPrint(sale.locationId || null)
     ]);
 
-    let companyName = (about && about.appName) || 'Company';
     let companyAddress = (about && about.companyAddress) || '';
     let locationPhone = '';
     let locationEmail = '';
     if (locationResult.location) {
-        companyName = locationResult.location.name || companyName;
         companyAddress = getLocationPostalBlock(locationResult.location);
         locationPhone = String(locationResult.location.phone || '').trim();
         locationEmail = String(locationResult.location.email || '').trim();
     } else if (locationResult.fallbackLabel) {
         companyAddress = companyAddress ? `${companyAddress}\n${locationResult.fallbackLabel}` : locationResult.fallbackLabel;
     }
+
+    const shopDisplayName =
+        (locationResult.location && String(locationResult.location.name || '').trim()) ||
+        (about && String(about.appName || '').trim()) ||
+        (about && String(about.appTitle || '').trim()) ||
+        'Company';
 
     const salesPrint = mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint);
     const ref = (sale.reference || '').trim() || String(sale._id || '');
@@ -52,7 +56,8 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
     }
 
     const settings = {
-        companyName,
+        shopDisplayName,
+        companyName: shopDisplayName,
         companyAddress,
         locationPhone,
         locationEmail,
