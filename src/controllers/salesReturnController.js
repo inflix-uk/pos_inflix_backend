@@ -4,8 +4,6 @@ const Customer = require('../models/Customer');
 const SoldSerial = require('../models/SoldSerial');
 const SerialHistory = require('../models/SerialHistory');
 const Product = require('../models/Product');
-const GeneralSettings = require('../models/GeneralSettings');
-const { verifyAdminTotpCode } = require('./generalSettingsController');
 const asyncHandler = require('../middleware/asyncHandler');
 const auditService = require('../services/auditService');
 const transactionService = require('../services/transactionService');
@@ -202,32 +200,6 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
     const body = { ...req.body };
     if (body.tenantId !== undefined) delete body.tenantId;
     body.tenantId = tenantId;
-
-    console.log('[POST /api/sales-returns] incoming body:', JSON.stringify({
-        returnType: body.returnType,
-        customerName: body.customerName,
-        customerId: body.customerId,
-        linkedInvoiceRef: body.linkedInvoiceRef,
-        refundMethod: body.refundMethod,
-        refundAccountId: body.refundAccountId,
-        adminOtpCode: body.adminOtpCode ? `***${String(body.adminOtpCode).slice(-2)}` : undefined,
-        orderTax: body.orderTax,
-        discount: body.discount,
-        shipping: body.shipping,
-        paid: body.paid,
-        total: body.total,
-        grandTotal: body.grandTotal,
-        itemCount: Array.isArray(body.items) ? body.items.length : 0,
-        items: Array.isArray(body.items) ? body.items.map(it => ({
-            product: it.product,
-            sku: it.sku,
-            quantity: it.quantity,
-            netUnitPrice: it.netUnitPrice,
-            subtotal: it.subtotal,
-            returnDestination: it.returnDestination,
-            serialCount: Array.isArray(it.serialNumbers) ? it.serialNumbers.length : 0
-        })) : []
-    }, null, 2));
     
     // Phase 3: Location-based access control - validate locationId if provided
     const userScope = getUserLocationScope(req.user);
@@ -257,45 +229,6 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
         }
         if (!body.refundMethod || !['cash', 'card', 'bank'].includes(body.refundMethod)) {
             return res.status(400).json({ success: false, message: 'Refund requires refundMethod: cash, card, or bank' });
-        }
-    }
-
-    // High-value return gate: above the configured threshold the admin's Google Authenticator code is required
-    // for ANY sales return (refund or store credit), regardless of which UI path created it.
-    {
-        const itemsTotal = body.items.reduce((s, it) => s + (Number(it.subtotal) || 0), 0);
-        const orderTax = Number(body.orderTax) || 0;
-        const discount = Number(body.discount) || 0;
-        const shipping = Number(body.shipping) || 0;
-        const expectedGrandTotal = Math.round((itemsTotal + orderTax - discount + shipping) * 100) / 100;
-
-        const settings = await GeneralSettings.getSettings();
-        const threshold = typeof settings.refundOtpThreshold === 'number' ? settings.refundOtpThreshold : 50;
-        if (expectedGrandTotal > threshold) {
-            console.log(`[sales-return OTP gate] grandTotal=${expectedGrandTotal} > threshold=${threshold} — checking admin OTP`);
-            if (!settings.adminTotpEnabled || !settings.adminTotpSecret) {
-                return res.status(409).json({
-                    success: false,
-                    code: 'ADMIN_2FA_NOT_SETUP',
-                    message: `Returns over ${threshold} require admin Google Authenticator. Ask the admin to enable it in Settings > General.`
-                });
-            }
-            const otpCode = body.adminOtpCode || req.headers['x-admin-otp'];
-            if (!otpCode) {
-                return res.status(401).json({
-                    success: false,
-                    code: 'ADMIN_OTP_REQUIRED',
-                    message: `Returns over ${threshold} require an admin Google Authenticator code`,
-                    refundOtpThreshold: threshold
-                });
-            }
-            if (!verifyAdminTotpCode(settings.adminTotpSecret, otpCode)) {
-                return res.status(401).json({
-                    success: false,
-                    code: 'ADMIN_OTP_INVALID',
-                    message: 'Invalid admin code — ask the admin for the current 6-digit code'
-                });
-            }
         }
     }
 

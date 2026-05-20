@@ -25,21 +25,6 @@ const generalSettingsSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
-    /** Admin's Google Authenticator (TOTP) base32 secret. Used to verify OTP on high-value refunds. */
-    adminTotpSecret: {
-        type: String,
-        default: null
-    },
-    /** True once the admin has enrolled Google Authenticator and verified the first code. */
-    adminTotpEnabled: {
-        type: Boolean,
-        default: false
-    },
-    /** Refund amount (in the app's configured currency) above which the admin's TOTP code is required. */
-    refundOtpThreshold: {
-        type: Number,
-        default: 50
-    },
     updatedByUserId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
