@@ -443,8 +443,13 @@ exports.saveRolePermissions = asyncHandler(async (req, res) => {
 // ---------- Permissions ----------
 
 exports.listPermissions = asyncHandler(async (req, res) => {
-    await ensureRbacSeeded.ensure();
+    const seedResult = await ensureRbacSeeded.ensure();
     const tenantId = getTenantIdFromReq(req);
+    // If new permissions were just inserted (catalog grew on this server boot),
+    // invalidate the cached list so admins see them immediately.
+    if (seedResult && seedResult.permissionsInserted) {
+        try { await cache.bumpNs('admin:permissions', tenantId); } catch {}
+    }
     const permissions = await cache.cached(
         { ns: 'admin:permissions', tenantId, params: {}, ttlSec: TTL.REFERENCE },
         async () => Permission.find().sort('group key').lean()
