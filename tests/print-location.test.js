@@ -10,6 +10,7 @@ const Location = require('../src/models/Location');
 const Sale = require('../src/models/Sale');
 const { resolveLocationForPrint, getLocationAddressBlock, getLocationAddressLines } = require('../src/utils/printLocationHelper');
 const { buildReceiptEscpos, drawerKick, lineCharsForPaper, dividerLine } = require('../src/utils/escposReceipt');
+const { normalizeSalesReceiptSectionOrder } = require('../src/utils/receiptPrinterPrintOptions');
 const printController = require('../src/controllers/printController');
 
 describe('printLocationHelper', () => {
@@ -105,6 +106,17 @@ describe('printLocationHelper', () => {
   });
 });
 
+describe('normalizeSalesReceiptSectionOrder', () => {
+    it('places reference_qr before thank_you (footer QR)', () => {
+        const order = normalizeSalesReceiptSectionOrder(['logo', 'ref_date', 'reference_qr', 'items', 'total', 'thank_you']);
+        const iQr = order.indexOf('reference_qr');
+        const iThank = order.indexOf('thank_you');
+        expect(iQr).toBeGreaterThanOrEqual(0);
+        expect(iThank).toBeGreaterThan(iQr);
+        expect(order[iThank - 1]).toBe('reference_qr');
+    });
+});
+
 describe('Receipt ESC/POS uses location header', () => {
   it('receipt buffer contains location name when settings use it', () => {
     const sale = {
@@ -144,6 +156,25 @@ describe('Receipt ESC/POS uses location header', () => {
     const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
     const kick = drawerKick(0);
     expect(buffer.indexOf(kick)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('includes payments block for wholesale cash', () => {
+    const sale = {
+      reference: 'INV-556',
+      type: 'wholesale',
+      items: [{ name: 'Screen Protector', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      payments: { cash: 10, card: 0, credit: 0, bank: 0 },
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '', salesPrint: { paperWidthMm: 80 } });
+    const str = buffer.toString('utf8');
+    expect(str).toContain('Payments');
+    expect(str).toContain('Cash');
+    expect(str).toContain('£10.00');
   });
 
   it('uses full-width dividers for 80mm paper', () => {

@@ -11,13 +11,13 @@ const SALES_RECEIPT_SECTION_IDS = [
     'location_email',
     'receipt_title',
     'ref_date',
-    'reference_qr',
     'customer_name_address',
     'customer_phone',
     'customer_email',
     'items',
     'total',
     'terms',
+    'reference_qr',
     'thank_you'
 ];
 
@@ -35,7 +35,6 @@ function resolveShopVisibility(p) {
 
 function normalizeSalesReceiptSectionOrder(input) {
     const arr = Array.isArray(input) ? input : [];
-    const hadReferenceQrInInput = arr.includes('reference_qr');
     const seen = new Set();
     const out = [];
     for (const id of arr) {
@@ -50,13 +49,12 @@ function normalizeSalesReceiptSectionOrder(input) {
             seen.add(id);
         }
     }
-    if (!hadReferenceQrInInput) {
+    if (out.includes('reference_qr')) {
         const base = out.filter((id) => id !== 'reference_qr');
-        const iRef = base.indexOf('ref_date');
-        if (iRef !== -1) {
-            base.splice(iRef + 1, 0, 'reference_qr');
-            return base;
-        }
+        const iThank = base.indexOf('thank_you');
+        const at = iThank >= 0 ? iThank : base.length;
+        base.splice(at, 0, 'reference_qr');
+        return base;
     }
     return out;
 }

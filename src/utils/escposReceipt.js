@@ -91,6 +91,65 @@ function pushCenteredLines(parts, lines, maxChars) {
     parts.push(alignLeft());
 }
 
+function formatMoney(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '£0.00';
+    return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 2 }).format(v);
+}
+
+/** Date only (matches 80mm PDF ref/date row). */
+function formatReceiptDate(iso) {
+    if (!iso) return '';
+    return new Date(iso).toLocaleDateString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+    });
+}
+
+/** One line with left and right text (ref + date, total amount). */
+function lineLeftRight(cols, left, right) {
+    const l = String(left || '');
+    const r = String(right || '');
+    const maxLeft = Math.max(8, cols - r.length - 1);
+    const leftClip = l.slice(0, maxLeft);
+    const pad = Math.max(1, cols - leftClip.length - r.length);
+    return line(leftClip + ' '.repeat(pad) + r);
+}
+
+function appendPaymentBreakdown(parts, sale, cols) {
+    const p = sale.payments;
+    const hasWholesale =
+        p &&
+        (Number(p.cash) > 0 || Number(p.card) > 0 || Number(p.bank) > 0 || Number(p.credit) > 0);
+    if (hasWholesale) {
+        parts.push(line(dividerLine(cols)));
+        parts.push(boldOn());
+        parts.push(line('Payments'));
+        parts.push(boldOff());
+        const rows = [];
+        if (Number(p.cash) > 0) rows.push({ method: 'Cash', amount: p.cash });
+        if (Number(p.card) > 0) rows.push({ method: 'Card', amount: p.card });
+        if (Number(p.bank) > 0) rows.push({ method: 'Bank', amount: p.bank });
+        if (Number(p.credit) > 0) rows.push({ method: 'Balance to pay', amount: p.credit });
+        for (const { method, amount } of rows) {
+            parts.push(line(`${method} — ${formatMoney(amount)}`.slice(0, cols)));
+        }
+        parts.push(line());
+        return;
+    }
+    const method = String(sale.paymentMethod || '').toLowerCase();
+    if (!method || method === 'credit') return;
+    const total = (sale.total != null ? Number(sale.total) : 0) - (sale.discount != null ? Number(sale.discount) : 0);
+    const label = method.charAt(0).toUpperCase() + method.slice(1);
+    parts.push(line(dividerLine(cols)));
+    parts.push(boldOn());
+    parts.push(line('Payments'));
+    parts.push(boldOff());
+    parts.push(line(`${label} — ${formatMoney(total)}`.slice(0, cols)));
+    parts.push(line());
+}
+
 /** ESC p — pulse cash drawer (pin 0 = drawer kick connector on most Epson/Star). */
 function drawerKick(pin = 0, onTime = 25, offTime = 250) {
     const m = pin === 1 ? 1 : 0;
@@ -192,15 +251,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
     const cols = lineCharsForPaper(o.paperWidthMm);
 
     const ref = (sale.reference || '').trim();
-    const dateStr = sale.createdAt
-        ? new Date(sale.createdAt).toLocaleDateString('en-GB', {
-              day: '2-digit',
-              month: 'short',
-              year: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit'
-          })
-        : '';
+    const dateStr = formatReceiptDate(sale.createdAt);
 
     let hasMetaForDivider = false;
     const markMeta = () => {
@@ -283,8 +334,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             }
             case 'ref_date': {
                 if (o.showReferenceAndDate === false) break;
-                parts.push(line(`Ref: ${ref}`));
-                parts.push(line(dateStr));
+                parts.push(lineLeftRight(cols, `Ref: ${ref}`, dateStr));
                 markMeta();
                 break;
             }
@@ -336,9 +386,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                     const qty = item.quantity || 1;
                     const price = item.price != null ? Number(item.price) : 0;
                     const lineTotal = qty * price;
-                    const priceStr = typeof price === 'number' ? price.toFixed(2) : '0.00';
-                    const totalStr = lineTotal.toFixed(2);
-                    parts.push(line(`${qty} x ${priceStr} = ${totalStr}`));
+                    parts.push(line(`${qty} x ${formatMoney(price)} = ${formatMoney(lineTotal)}`.slice(0, cols)));
                     parts.push(line());
                 });
                 break;
@@ -351,18 +399,17 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 // sale.total is pre-discount in this codebase; final amount is total - discount (mirrors A4 / 80mm PDF).
                 const finalTotal = (sale.total != null ? Number(sale.total) : 0) - discount;
                 if (discount > 0) {
-                    parts.push(line(`Subtotal: ${subtotal.toFixed(2)}`));
+                    parts.push(lineLeftRight(cols, 'Subtotal:', formatMoney(subtotal)));
                     const lbl = sale.discountType === 'percent' && sale.discountValue
                         ? `Discount (${Math.min(100, Number(sale.discountValue))}%):`
                         : 'Discount:';
-                    parts.push(line(`${lbl} -${discount.toFixed(2)}`));
+                    parts.push(lineLeftRight(cols, lbl, `-${formatMoney(discount)}`));
                 }
-                parts.push(alignCenter());
                 parts.push(boldOn());
-                parts.push(line(`Total: ${finalTotal.toFixed(2)}`));
+                parts.push(lineLeftRight(cols, 'Total:', formatMoney(finalTotal)));
                 parts.push(boldOff());
-                parts.push(alignLeft());
                 parts.push(line());
+                appendPaymentBreakdown(parts, sale, cols);
                 break;
             }
             case 'terms': {
