@@ -7,6 +7,7 @@
 const Permission = require('../models/Permission');
 const Role = require('../models/Role');
 const User = require('../models/User');
+const tenantContext = require('../lib/tenantContext');
 
 const PERMISSIONS = [
     { key: 'dashboard.view', description: 'View main dashboard (/dashboard)', group: 'Dashboard' },
@@ -192,26 +193,33 @@ async function ensureRoles() {
     }
 }
 
-// Process-level memoisation. The seed is idempotent and the catalog is fixed at boot,
-// so re-running it on every Admin API call wastes ~130 DB roundtrips per page load.
-let ensurePromise = null;
+// Memoised per tenant — a single global promise only seeded the first tenant's DB (broken multi-tenant RBAC).
+const ensureByTenant = new Map();
+
+function currentTenantKey() {
+    const store = tenantContext.getStore();
+    return (store && store.tenantId) ? String(store.tenantId) : 'default';
+}
 
 /**
  * Ensures permissions and default roles exist. Call before listRoles or listPermissions.
- * Memoised per process so repeated calls are free; on failure the next call will retry.
+ * Memoised per tenant; on failure the next call for that tenant will retry.
  */
 function ensure() {
-    if (ensurePromise) return ensurePromise;
-    ensurePromise = (async () => {
+    const tenantKey = currentTenantKey();
+    let promise = ensureByTenant.get(tenantKey);
+    if (promise) return promise;
+    promise = (async () => {
         const inserted = await ensurePermissions();
         await ensureRoles();
         await ensurePrintingPermissionOnRoles();
         return { permissionsInserted: inserted };
     })().catch((err) => {
-        ensurePromise = null;
+        ensureByTenant.delete(tenantKey);
         throw err;
     });
-    return ensurePromise;
+    ensureByTenant.set(tenantKey, promise);
+    return promise;
 }
 
 module.exports = { ensure, ensurePermissions, ensureRoles, ensurePrintingPermissionOnRoles, PERMISSIONS };
