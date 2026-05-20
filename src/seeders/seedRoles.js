@@ -45,14 +45,22 @@ async function seedRolesOnConnection(conn, opts = {}) {
     const staffKeys = [
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
         'customer.view', 'customer.create', 'customer.edit', 'parcel.create', 'parcel.status_change',
-        'repair.view', 'repair.create', 'repair.edit', 'repair.delete'
+        'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
+        'settings.printing'
     ];
     const staffPermIds = await getPermissionIdsByKeys(Permission, staffKeys);
 
-    const cashierKeys = ['sale.view', 'sale.create', 'return.create', 'product.view', 'customer.view', 'customer.create', 'customer.edit'];
+    const cashierKeys = [
+        'sale.view', 'sale.create', 'return.create', 'product.view', 'customer.view', 'customer.create', 'customer.edit',
+        'settings.printing'
+    ];
     const cashierPermIds = await getPermissionIdsByKeys(Permission, cashierKeys);
 
-    const warehouseKeys = ['product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change', 'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return'];
+    const warehouseKeys = [
+        'product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change',
+        'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
+        'settings.printing'
+    ];
     const warehousePermIds = await getPermissionIdsByKeys(Permission, warehouseKeys);
 
     const roleDefs = [

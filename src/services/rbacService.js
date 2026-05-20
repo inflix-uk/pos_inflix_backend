@@ -20,7 +20,7 @@ const ALL_PERMISSION_KEYS = [
     'customer.view', 'customer.create', 'customer.edit',
     'accounts.view', 'accounts.payment',
     'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
-    'settings.view', 'settings.edit', 'settings.manage',
+    'settings.view', 'settings.edit', 'settings.manage', 'settings.printing',
     'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
     'expense_category.view', 'expense_category.manage',
     'expense.view', 'expense.create', 'expense.edit_draft', 'expense.submit',
@@ -38,6 +38,10 @@ function getCached(userId) {
     const entry = permissionCache.get(key);
     if (!entry || Date.now() > entry.expiresAt) return null;
     return entry;
+}
+
+function invalidateAllPermissionCaches() {
+    permissionCache.clear();
 }
 
 function setCached(userId, keys, role, roles) {
@@ -187,5 +191,6 @@ module.exports = {
     getPermissionKeysForUser,
     can,
     attachPermissionKeys,
-    hasAnyRole
+    hasAnyRole,
+    invalidateAllPermissionCaches
 };

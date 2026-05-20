@@ -222,6 +222,9 @@ exports.login = asyncHandler(async (req, res) => {
         });
     }
 
+    // Ensure RBAC catalog + till printing permission (memoised per process)
+    await require('../services/ensureRbacSeeded').ensure();
+
     // Update last login
     user.lastLogin = Date.now();
     await user.save({ validateBeforeSave: false });
@@ -267,6 +270,9 @@ exports.login = asyncHandler(async (req, res) => {
 // @route   GET /api/auth/me
 // @access  Private
 exports.getMe = asyncHandler(async (req, res) => {
+    await require('../services/ensureRbacSeeded').ensure();
+    const rbacService = require('../services/rbacService');
+    await rbacService.attachPermissionKeys(req.user);
     const permissionKeys = req.user.permissionKeys ? Array.from(req.user.permissionKeys) : [];
     const assignedLocationIds = (req.user.assignedLocationIds || []).map((id) => (id && id.toString ? id.toString() : String(id)));
     const defaultLocationId = req.user.defaultLocationId ? (req.user.defaultLocationId.toString ? req.user.defaultLocationId.toString() : String(req.user.defaultLocationId)) : null;

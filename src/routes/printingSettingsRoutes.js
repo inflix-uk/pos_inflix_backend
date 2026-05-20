@@ -5,7 +5,7 @@ const { getPrintingSettings, updatePrintingSettings } = require('../controllers/
 
 router.use(protect);
 
-router.get('/', requirePermission('settings.view'), getPrintingSettings);
-router.put('/', requirePermission('settings.manage'), updatePrintingSettings);
+router.get('/', requirePermission('settings.view', 'settings.printing', 'settings.manage'), getPrintingSettings);
+router.put('/', requirePermission('settings.printing', 'settings.manage'), updatePrintingSettings);
 
 module.exports = router;

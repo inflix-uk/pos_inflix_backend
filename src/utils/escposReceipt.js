@@ -16,10 +16,12 @@ function cmd(...bytes) {
 /** Strip/replace Unicode so CP437 thermal printers do not print mojibake (e.g. ΓÇö for em dash). */
 function escposSafeText(str) {
     return String(str || '')
+        .replace(/^\uFEFF+/, '')
         .replace(/\u2014/g, '-')
         .replace(/\u2013/g, '-')
         .replace(/\u00b7/g, ' - ')
-        .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '');
+        .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '')
+        .trim();
 }
 
 function text(str) {
@@ -74,21 +76,25 @@ function feedLines(n) {
     return cmd(...bytes);
 }
 
-/** Font A, full print area, zero left margin (80mm thermal). */
-function printerInit(paperWidthMm) {
-    const mm = Number(paperWidthMm) || 80;
-    const printableMm = mm <= 58 ? 48 : mm <= 72 ? 64 : 72;
-    const dots = Math.min(576, Math.max(384, Math.round((printableMm / 25.4) * 203)));
-    const nL = dots & 0xff;
-    const nH = (dots >> 8) & 0xff;
+/**
+ * Minimal init — only commands widely supported on Epson/Star clones.
+ * GS ( W / GS L often print a literal "?" on cheap Windows RAW drivers.
+ */
+function printerInit() {
     return Buffer.concat([
         init(),
-        cmd(ESC, 0x74, 0), // CP437 — safe for ASCII text on most thermal printers
         cmd(ESC, 0x4d, 0), // Font A (48 cols on 80mm)
-        cmd(GS, 0x4c, 0, 0), // GS L — left margin 0
-        cmd(GS, 0x28, 0x57, 0x02, 0x00, 0x02, nL, nH), // GS ( W — print area width (dots)
         cmd(ESC, 0x32) // default line spacing
     ]);
+}
+
+/** Double-height shop title (avoid ESC E bold — prints "?" on some firmware). */
+function doubleHeightOn() {
+    return cmd(ESC, 0x21, 0x10);
+}
+
+function doubleHeightOff() {
+    return cmd(ESC, 0x21, 0);
 }
 
 function pushCenteredLines(parts, lines, maxChars) {
@@ -253,9 +259,10 @@ function receiptItemDescriptionLine(item, slugOrder) {
  */
 function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}) {
     const parts = [];
-    const shopName = String(
-        (settings && (settings.shopDisplayName || settings.companyName)) || 'Company'
-    ).trim() || 'Company';
+    const shopName =
+        escposSafeText(
+            (settings && (settings.shopDisplayName || settings.companyName)) || 'Company'
+        ) || 'Company';
     const companyAddress = (settings && settings.companyAddress) || '';
     const locationPhone = (settings && settings.locationPhone) || '';
     const locationEmail = (settings && settings.locationEmail) || '';
@@ -280,7 +287,7 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
         }
     };
 
-    parts.push(printerInit(o.paperWidthMm));
+    parts.push(printerInit());
 
     if (o.openCashDrawerOnCashPayment !== false && saleHasCashPayment(sale)) {
         const pin = o.cashDrawerPin === 1 ? 1 : 0;
@@ -300,9 +307,9 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             case 'shop_name': {
                 if (o.showShopName === false) break;
                 parts.push(alignCenter());
-                parts.push(boldOn());
+                parts.push(doubleHeightOn());
                 parts.push(line(shopName.slice(0, cols)));
-                parts.push(boldOff());
+                parts.push(doubleHeightOff());
                 parts.push(alignLeft());
                 parts.push(line());
                 break;
