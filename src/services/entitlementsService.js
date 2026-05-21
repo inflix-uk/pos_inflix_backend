@@ -111,6 +111,18 @@ async function getEntitlements(tenantId) {
         }
     });
 
+    // Sales/Invoices are mutually exclusive first-class features. Always emit explicit
+    // booleans and enforce the mutex regardless of catalog state.
+    for (const key of ['sales', 'invoices']) {
+        if (overrideFeatures[key] !== undefined) enabledFeatures[key] = !!overrideFeatures[key];
+        else if (planFeatures[key] !== undefined) enabledFeatures[key] = !!planFeatures[key];
+        else if (enabledFeatures[key] === undefined) enabledFeatures[key] = false;
+    }
+    if (enabledFeatures.sales && enabledFeatures.invoices) {
+        // Last-write-wins toward invoices when ambiguous.
+        enabledFeatures.sales = false;
+    }
+
     const limits = {};
     limitCatalog.forEach((l) => {
         if (overrideLimits[l.key] !== undefined && overrideLimits[l.key] !== null) {
@@ -195,10 +207,16 @@ async function getUsage(tenantId) {
     };
 }
 
+function invalidateEntitlementsCache(tenantId) {
+    if (tenantId == null) _entitlementCache.clear();
+    else _entitlementCache.delete(tenantId);
+}
+
 module.exports = {
     getEntitlements,
     assertFeature,
     assertLimit,
     getUsage,
-    mapToObject
+    mapToObject,
+    invalidateEntitlementsCache
 };

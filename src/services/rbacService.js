@@ -183,9 +183,20 @@ function hasAnyRole(user, ...roleNames) {
     return false;
 }
 
+function invalidateUserCache(userId) {
+    if (userId == null) return;
+    permissionCache.delete(String(userId));
+}
+
+function invalidateAllCache() {
+    permissionCache.clear();
+}
+
 module.exports = {
     getPermissionKeysForUser,
     can,
     attachPermissionKeys,
-    hasAnyRole
+    hasAnyRole,
+    invalidateUserCache,
+    invalidateAllCache
 };
