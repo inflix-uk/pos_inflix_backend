@@ -21,7 +21,14 @@ function isReplSetMismatchError(err) {
 
 const connectDB = async () => {
     const defaultDbName = (config.tenantDbPrefix || 'tenant_') + (config.tenantId || 'default');
-    const originalUri = process.env.MONGODB_URI;
+    const originalUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+    if (!originalUri || typeof originalUri !== 'string') {
+        console.error(
+            'Error: MONGODB_URI is not set. Copy pos_inflix_backend/.env.example to .env and set your MongoDB connection string.'
+        );
+        process.exit(1);
+    }
 
     try {
         const conn = await mongoose.connect(originalUri, {

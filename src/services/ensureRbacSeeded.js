@@ -7,6 +7,7 @@
 const Permission = require('../models/Permission');
 const Role = require('../models/Role');
 const User = require('../models/User');
+const tenantContext = require('../lib/tenantContext');
 
 const PERMISSIONS = [
     { key: 'dashboard.view', description: 'View main dashboard (/dashboard)', group: 'Dashboard' },
@@ -52,6 +53,7 @@ const PERMISSIONS = [
     { key: 'settings.view', description: 'View settings', group: 'Settings' },
     { key: 'settings.edit', description: 'Edit settings', group: 'Settings' },
     { key: 'settings.manage', description: 'Manage company-wide settings (e.g. sales default account)', group: 'Settings' },
+    { key: 'settings.printing', description: 'Configure silent printing on this device (Print Bridge, printers)', group: 'Settings' },
     { key: 'repair.view', description: 'View repairs', group: 'Repairs' },
     { key: 'repair.create', description: 'Create repair', group: 'Repairs' },
     { key: 'repair.edit', description: 'Edit repair', group: 'Repairs' },
@@ -111,6 +113,20 @@ async function getPermissionIdsByKeys(keys) {
     return perms.map((p) => p._id);
 }
 
+/** Grant settings.printing to every role (default + custom). Idempotent. */
+async function ensurePrintingPermissionOnRoles() {
+    const perm = await Permission.findOne({ key: 'settings.printing' }).select('_id').lean();
+    if (!perm) return;
+    const result = await Role.updateMany(
+        {},
+        { $addToSet: { permissions: perm._id } }
+    );
+    if (result.modifiedCount > 0) {
+        const { invalidateAllPermissionCaches } = require('./rbacService');
+        invalidateAllPermissionCaches();
+    }
+}
+
 async function ensureRoles() {
     const count = await Role.countDocuments();
     if (count > 0) return;
@@ -122,12 +138,20 @@ async function ensureRoles() {
     const staffKeys = [
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
         'customer.view', 'customer.create', 'customer.edit', 'parcel.create', 'parcel.status_change',
-        'repair.view', 'repair.create', 'repair.edit', 'repair.delete'
+        'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
+        'settings.printing'
     ];
     const staffPermIds = await getPermissionIdsByKeys(staffKeys);
-    const cashierKeys = ['sale.view', 'sale.create', 'return.create', 'product.view', 'customer.view', 'customer.create', 'customer.edit'];
+    const cashierKeys = [
+        'sale.view', 'sale.create', 'return.create', 'product.view', 'customer.view', 'customer.create', 'customer.edit',
+        'settings.printing'
+    ];
     const cashierPermIds = await getPermissionIdsByKeys(cashierKeys);
-    const warehouseKeys = ['product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change', 'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return'];
+    const warehouseKeys = [
+        'product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change',
+        'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
+        'settings.printing'
+    ];
     const warehousePermIds = await getPermissionIdsByKeys(warehouseKeys);
 
     const roleDefs = [
@@ -169,25 +193,33 @@ async function ensureRoles() {
     }
 }
 
-// Process-level memoisation. The seed is idempotent and the catalog is fixed at boot,
-// so re-running it on every Admin API call wastes ~130 DB roundtrips per page load.
-let ensurePromise = null;
+// Memoised per tenant — a single global promise only seeded the first tenant's DB (broken multi-tenant RBAC).
+const ensureByTenant = new Map();
+
+function currentTenantKey() {
+    const store = tenantContext.getStore();
+    return (store && store.tenantId) ? String(store.tenantId) : 'default';
+}
 
 /**
  * Ensures permissions and default roles exist. Call before listRoles or listPermissions.
- * Memoised per process so repeated calls are free; on failure the next call will retry.
+ * Memoised per tenant; on failure the next call for that tenant will retry.
  */
 function ensure() {
-    if (ensurePromise) return ensurePromise;
-    ensurePromise = (async () => {
+    const tenantKey = currentTenantKey();
+    let promise = ensureByTenant.get(tenantKey);
+    if (promise) return promise;
+    promise = (async () => {
         const inserted = await ensurePermissions();
         await ensureRoles();
+        await ensurePrintingPermissionOnRoles();
         return { permissionsInserted: inserted };
     })().catch((err) => {
-        ensurePromise = null;
+        ensureByTenant.delete(tenantKey);
         throw err;
     });
-    return ensurePromise;
+    ensureByTenant.set(tenantKey, promise);
+    return promise;
 }
 
-module.exports = { ensure, ensurePermissions, ensureRoles, PERMISSIONS };
+module.exports = { ensure, ensurePermissions, ensureRoles, ensurePrintingPermissionOnRoles, PERMISSIONS };

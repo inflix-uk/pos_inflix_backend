@@ -56,6 +56,7 @@ const PERMISSIONS = [
     { key: 'settings.view', description: 'View settings', group: 'Settings' },
     { key: 'settings.edit', description: 'Edit settings', group: 'Settings' },
     { key: 'settings.manage', description: 'Manage company-wide settings (e.g. sales default account)', group: 'Settings' },
+    { key: 'settings.printing', description: 'Configure silent printing on this device (Print Bridge, printers)', group: 'Settings' },
     { key: 'repair.view', description: 'View repairs', group: 'Repairs' },
     { key: 'repair.create', description: 'Create repair', group: 'Repairs' },
     { key: 'repair.edit', description: 'Edit repair', group: 'Repairs' },
