@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const { protect, requirePermission } = require('../middleware/auth');
-<<<<<<< HEAD
 const {
     getGeneralSettings,
     updateSalesAutoSelectAccount,
@@ -12,9 +11,6 @@ const {
     verifyAndEnableAdminTotp,
     disableAdminTotp
 } = require('../controllers/generalSettingsController');
-=======
-const { getGeneralSettings, updateSalesAutoSelectAccount, updateSalesMode, updateNegativeStock } = require('../controllers/generalSettingsController');
->>>>>>> 691dc86c5ee9cf77e6201fb400f473562185f26d
 
 router.use(protect);
 

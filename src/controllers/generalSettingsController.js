@@ -217,7 +217,6 @@ exports.updateNegativeStock = asyncHandler(async (req, res) => {
         data
     });
 });
-<<<<<<< HEAD
 
 // @desc    Update refund OTP threshold
 // @route   PUT /api/settings/general/refund-otp-threshold
@@ -364,5 +363,3 @@ exports.disableAdminTotp = asyncHandler(async (req, res) => {
         data: { adminTotpEnabled: false }
     });
 });
-=======
->>>>>>> 691dc86c5ee9cf77e6201fb400f473562185f26d
