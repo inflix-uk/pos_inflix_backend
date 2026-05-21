@@ -4,8 +4,6 @@ const Supplier = require('../models/Supplier');
 const asyncHandler = require('../middleware/asyncHandler');
 const activityLogService = require('../services/activityLogService');
 const mongoose = require('mongoose');
-const speakeasy = require('speakeasy');
-const qrcode = require('qrcode');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
@@ -41,8 +39,6 @@ exports.getGeneralSettings = asyncHandler(async (req, res) => {
                 defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
                 retailModeEnabled: !!settings.retailModeEnabled,
                 allowNegativeStock: !!settings.allowNegativeStock,
-                adminTotpEnabled: !!settings.adminTotpEnabled,
-                refundOtpThreshold: typeof settings.refundOtpThreshold === 'number' ? settings.refundOtpThreshold : 50,
                 updatedAtUtc: settings.updatedAt
             };
             if (settings.defaultSalesAccountId) {
@@ -221,6 +217,7 @@ exports.updateNegativeStock = asyncHandler(async (req, res) => {
         data
     });
 });
+<<<<<<< HEAD
 
 // @desc    Update refund OTP threshold
 // @route   PUT /api/settings/general/refund-otp-threshold
@@ -367,3 +364,5 @@ exports.disableAdminTotp = asyncHandler(async (req, res) => {
         data: { adminTotpEnabled: false }
     });
 });
+=======
+>>>>>>> 691dc86c5ee9cf77e6201fb400f473562185f26d

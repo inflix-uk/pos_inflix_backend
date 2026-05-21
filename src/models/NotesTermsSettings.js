@@ -18,6 +18,10 @@ const receiptPrinterSalesPrintSchema = new mongoose.Schema({
     showTotal: { type: Boolean, default: true },
     showTermsText: { type: Boolean, default: true },
     showThankYou: { type: Boolean, default: true },
+    /** ESC/POS: pulse drawer when sale has cash payment (retail cash or wholesale payments.cash > 0). */
+    openCashDrawerOnCashPayment: { type: Boolean, default: true },
+    /** 0 = drawer pin 2 (default); 1 = pin 5 on some Epson/Star models. */
+    cashDrawerPin: { type: Number, default: 0, min: 0, max: 1 },
     sectionOrder: [{ type: String }],
     paperWidthMm: { type: Number, default: 80, min: 58, max: 80 },
     sideMarginMm: { type: Number, default: 4, min: 2, max: 8 },

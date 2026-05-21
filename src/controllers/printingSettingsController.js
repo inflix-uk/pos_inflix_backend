@@ -2,6 +2,7 @@ const PrintingSettings = require('../models/PrintingSettings');
 const asyncHandler = require('../middleware/asyncHandler');
 const activityLogService = require('../services/activityLogService');
 const { getTenantIdFromReq } = require('../middleware/auth');
+const rbacService = require('../services/rbacService');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -38,9 +39,17 @@ exports.getPrintingSettings = asyncHandler(async (req, res) => {
                     updatedAt: null
                 };
             }
-            // Do not send token value to client for security (client stores it in localStorage)
             const { agentToken, ...safe } = settings;
-            return { ...safe, hasAgentToken: !!agentToken };
+            const canConfigurePrinting =
+                rbacService.can(req.user, 'settings.printing') ||
+                rbacService.can(req.user, 'settings.manage') ||
+                rbacService.can(req.user, 'settings.edit');
+            return {
+                ...safe,
+                hasAgentToken: !!agentToken,
+                // Till staff need token restored per device (stored server-side, not only localStorage).
+                ...(canConfigurePrinting ? { agentToken: agentToken || '' } : {})
+            };
         }
     );
 
@@ -90,9 +99,17 @@ exports.updatePrintingSettings = asyncHandler(async (req, res) => {
     });
     await invalidatePrintingSettingsCache(getTenantIdFromReq(req));
 
-    const { agentToken: _at, ...safe } = settings;
+    const { agentToken: savedToken, ...safe } = settings;
+    const canConfigurePrinting =
+        rbacService.can(req.user, 'settings.printing') ||
+        rbacService.can(req.user, 'settings.manage') ||
+        rbacService.can(req.user, 'settings.edit');
     res.status(200).json({
         success: true,
-        data: { ...safe, hasAgentToken: !!settings.agentToken }
+        data: {
+            ...safe,
+            hasAgentToken: !!savedToken,
+            ...(canConfigurePrinting ? { agentToken: savedToken || '' } : {})
+        }
     });
 });

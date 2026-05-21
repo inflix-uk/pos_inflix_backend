@@ -9,7 +9,8 @@ const mongoose = require('mongoose');
 const Location = require('../src/models/Location');
 const Sale = require('../src/models/Sale');
 const { resolveLocationForPrint, getLocationAddressBlock, getLocationAddressLines } = require('../src/utils/printLocationHelper');
-const { buildReceiptEscpos } = require('../src/utils/escposReceipt');
+const { buildReceiptEscpos, drawerKick, lineCharsForPaper, dividerLine } = require('../src/utils/escposReceipt');
+const { normalizeSalesReceiptSectionOrder } = require('../src/utils/receiptPrinterPrintOptions');
 const printController = require('../src/controllers/printController');
 
 describe('printLocationHelper', () => {
@@ -105,6 +106,31 @@ describe('printLocationHelper', () => {
   });
 });
 
+describe('resolveShopVisibility (receipt print)', () => {
+    const { mergeReceiptPrinterSalesPrint } = require('../src/utils/receiptPrinterPrintOptions');
+
+    it('keeps shop name when showShopHeader is false but showShopName is true', () => {
+        const o = mergeReceiptPrinterSalesPrint({
+            showShopHeader: false,
+            showShopName: true,
+            showShopAddress: true
+        });
+        expect(o.showShopName).toBe(true);
+        expect(o.showShopAddress).toBe(true);
+    });
+});
+
+describe('normalizeSalesReceiptSectionOrder', () => {
+    it('places reference_qr before thank_you (footer QR)', () => {
+        const order = normalizeSalesReceiptSectionOrder(['logo', 'ref_date', 'reference_qr', 'items', 'total', 'thank_you']);
+        const iQr = order.indexOf('reference_qr');
+        const iThank = order.indexOf('thank_you');
+        expect(iQr).toBeGreaterThanOrEqual(0);
+        expect(iThank).toBeGreaterThan(iQr);
+        expect(order[iThank - 1]).toBe('reference_qr');
+    });
+});
+
 describe('Receipt ESC/POS uses location header', () => {
   it('receipt buffer contains location name when settings use it', () => {
     const sale = {
@@ -127,6 +153,84 @@ describe('Receipt ESC/POS uses location header', () => {
     const str = buffer.toString('utf8');
     expect(str).toContain('Branch Manchester');
     expect(str).toContain('1 High Street');
+  });
+
+  it('includes cash drawer kick bytes for cash retail sales', () => {
+    const sale = {
+      reference: 'INV-CASH',
+      type: 'retail',
+      paymentMethod: 'cash',
+      items: [{ name: 'Item', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
+    const kick = drawerKick(0);
+    expect(buffer.indexOf(kick)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('includes payments block for wholesale cash', () => {
+    const sale = {
+      reference: 'INV-556',
+      type: 'wholesale',
+      items: [{ name: 'Screen Protector', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      payments: { cash: 10, card: 0, credit: 0, bank: 0 },
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '', salesPrint: { paperWidthMm: 80 } });
+    const str = buffer.toString('utf8');
+    expect(str).toContain('Payments');
+    expect(str).toContain('Cash');
+    expect(str).toContain('Cash - GBP 10.00');
+    expect(str).not.toContain('\u2014');
+    expect(str).toContain('GBP 10.00');
+  });
+
+  it('uses full-width dividers for 80mm paper', () => {
+    expect(lineCharsForPaper(80)).toBe(48);
+    expect(dividerLine(48).length).toBe(48);
+    const sale = {
+      reference: 'INV-001',
+      type: 'retail',
+      paymentMethod: 'card',
+      items: [{ name: 'Cable', price: 7.99, quantity: 1 }],
+      total: 7.99,
+      subtotal: 7.99,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, {
+      companyName: 'Shop',
+      companyAddress: '1 High Street',
+      salesPrint: { paperWidthMm: 80 }
+    });
+    const str = buffer.toString('utf8');
+    expect(str).toContain(dividerLine(48));
+  });
+
+  it('does not include drawer kick for card-only sales', () => {
+    const sale = {
+      reference: 'INV-CARD',
+      type: 'retail',
+      paymentMethod: 'card',
+      items: [{ name: 'Item', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
+    const kick = drawerKick(0);
+    expect(buffer.indexOf(kick)).toBe(-1);
   });
 });
 

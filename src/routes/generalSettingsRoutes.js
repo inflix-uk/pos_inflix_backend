@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, requirePermission } = require('../middleware/auth');
+<<<<<<< HEAD
 const {
     getGeneralSettings,
     updateSalesAutoSelectAccount,
@@ -11,6 +12,9 @@ const {
     verifyAndEnableAdminTotp,
     disableAdminTotp
 } = require('../controllers/generalSettingsController');
+=======
+const { getGeneralSettings, updateSalesAutoSelectAccount, updateSalesMode, updateNegativeStock } = require('../controllers/generalSettingsController');
+>>>>>>> 691dc86c5ee9cf77e6201fb400f473562185f26d
 
 router.use(protect);
 
@@ -19,9 +23,5 @@ router.put('/sales-auto-select-account', requirePermission('settings.manage'), u
 router.put('/sales-mode', requirePermission('settings.manage'), updateSalesMode);
 router.put('/negative-stock', requirePermission('settings.manage'), updateNegativeStock);
 router.put('/refund-otp-threshold', requirePermission('settings.manage'), updateRefundOtpThreshold);
-
-router.post('/2fa/setup', requirePermission('settings.manage'), setupAdminTotp);
-router.post('/2fa/verify-enable', requirePermission('settings.manage'), verifyAndEnableAdminTotp);
-router.post('/2fa/disable', requirePermission('settings.manage'), disableAdminTotp);
 
 module.exports = router;

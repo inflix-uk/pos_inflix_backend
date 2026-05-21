@@ -20,7 +20,7 @@ const ALL_PERMISSION_KEYS = [
     'customer.view', 'customer.create', 'customer.edit',
     'accounts.view', 'accounts.payment',
     'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
-    'settings.view', 'settings.edit', 'settings.manage',
+    'settings.view', 'settings.edit', 'settings.manage', 'settings.printing',
     'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
     'expense_category.view', 'expense_category.manage',
     'expense.view', 'expense.create', 'expense.edit_draft', 'expense.submit',
@@ -30,6 +30,9 @@ const ALL_PERMISSION_KEYS = [
     'inventory.print_labels'
 ];
 
+/** Legacy users with role string but empty roles[] — still need till printing setup. */
+const LEGACY_TILL_ROLES = new Set(['staff', 'cashier', 'manager', 'warehouse']);
+
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const permissionCache = new Map(); // userId -> { keys: Set, role: string, roles: Array, expiresAt: number }
 
@@ -38,6 +41,14 @@ function getCached(userId) {
     const entry = permissionCache.get(key);
     if (!entry || Date.now() > entry.expiresAt) return null;
     return entry;
+}
+
+function invalidateAllPermissionCaches() {
+    permissionCache.clear();
+}
+
+function invalidateUserPermissionCache(userId) {
+    if (userId) permissionCache.delete(String(userId));
 }
 
 function setCached(userId, keys, role, roles) {
@@ -155,8 +166,15 @@ async function attachPermissionKeys(user) {
         const legacyRole = String(u.role || '').toLowerCase();
         if (legacyRole === 'admin') {
             ALL_PERMISSION_KEYS.forEach((k) => keys.add(k));
+        } else if (LEGACY_TILL_ROLES.has(legacyRole)) {
+            keys.add('settings.printing');
         }
         role = legacyRole;
+    }
+
+    // All RBAC roles: silent printing is granted to every role in DB; enforce if seed lagged.
+    if (roles.length > 0) {
+        keys.add('settings.printing');
     }
 
     setCached(userId, keys, role, roles);
@@ -197,6 +215,6 @@ module.exports = {
     can,
     attachPermissionKeys,
     hasAnyRole,
-    invalidateUserCache,
-    invalidateAllCache
+    invalidateAllPermissionCaches,
+    invalidateUserPermissionCache
 };

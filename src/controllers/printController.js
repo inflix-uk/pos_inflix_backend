@@ -5,6 +5,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const activityLogService = require('../services/activityLogService');
 const { buildReceiptEscpos } = require('../utils/escposReceipt');
+const { qrTextToEscposRaster } = require('../utils/escposGraphics');
 const { mergeReceiptPrinterSalesPrint } = require('../utils/receiptPrinterPrintOptions');
 const { variantAttributeSlugsOrderBySkuForSale } = require('../utils/printVariantAttributes');
 const { resolveLocationForPrint, getLocationPostalBlock } = require('../utils/printLocationHelper');
@@ -26,12 +27,10 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
         resolveLocationForPrint(sale.locationId || null)
     ]);
 
-    let companyName = (about && about.appName) || 'Company';
     let companyAddress = (about && about.companyAddress) || '';
     let locationPhone = '';
     let locationEmail = '';
     if (locationResult.location) {
-        companyName = locationResult.location.name || companyName;
         companyAddress = getLocationPostalBlock(locationResult.location);
         locationPhone = String(locationResult.location.phone || '').trim();
         locationEmail = String(locationResult.location.email || '').trim();
@@ -39,13 +38,33 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
         companyAddress = companyAddress ? `${companyAddress}\n${locationResult.fallbackLabel}` : locationResult.fallbackLabel;
     }
 
+    const shopDisplayName =
+        (locationResult.location && String(locationResult.location.name || '').trim()) ||
+        (about && String(about.appName || '').trim()) ||
+        (about && String(about.appTitle || '').trim()) ||
+        'Company';
+
+    const salesPrint = mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint);
+    const ref = (sale.reference || '').trim() || String(sale._id || '');
+
+    // Logo omitted on silent ESC/POS — raster logos print as garbage on many Windows RAW drivers.
+    const logoEscpos = null;
+
+    let qrEscpos = null;
+    if (salesPrint.showReceiptReferenceQr !== false && ref) {
+        qrEscpos = await qrTextToEscposRaster(ref, salesPrint.receiptReferenceQrSizeMm);
+    }
+
     const settings = {
-        companyName,
+        shopDisplayName,
+        companyName: shopDisplayName,
         companyAddress,
         locationPhone,
         locationEmail,
         receiptTerms: (notesTerms && notesTerms.receiptPrinterSalesTerms) || '',
-        salesPrint: mergeReceiptPrinterSalesPrint(notesTerms && notesTerms.receiptPrinterSalesPrint)
+        salesPrint,
+        logoEscpos,
+        qrEscpos
     };
 
     const variantMap = await variantAttributeSlugsOrderBySkuForSale(sale, getTenantIdFromReq(req));

@@ -11,20 +11,23 @@ const SALES_RECEIPT_SECTION_IDS = [
     'location_email',
     'receipt_title',
     'ref_date',
-    'reference_qr',
     'customer_name_address',
     'customer_phone',
     'customer_email',
     'items',
     'total',
     'terms',
+    'reference_qr',
     'thank_you'
 ];
 
 const SALES_SECTION_SET = new Set(SALES_RECEIPT_SECTION_IDS);
 
 function resolveShopVisibility(p) {
-    if (p.showShopHeader === false) {
+    const nameSet = typeof p.showShopName === 'boolean';
+    const addrSet = typeof p.showShopAddress === 'boolean';
+    /** Legacy showShopHeader only applies when per-field toggles were never saved. */
+    if (p.showShopHeader === false && !nameSet && !addrSet) {
         return { showShopName: false, showShopAddress: false };
     }
     return {
@@ -35,7 +38,6 @@ function resolveShopVisibility(p) {
 
 function normalizeSalesReceiptSectionOrder(input) {
     const arr = Array.isArray(input) ? input : [];
-    const hadReferenceQrInInput = arr.includes('reference_qr');
     const seen = new Set();
     const out = [];
     for (const id of arr) {
@@ -50,13 +52,12 @@ function normalizeSalesReceiptSectionOrder(input) {
             seen.add(id);
         }
     }
-    if (!hadReferenceQrInInput) {
+    if (out.includes('reference_qr')) {
         const base = out.filter((id) => id !== 'reference_qr');
-        const iRef = base.indexOf('ref_date');
-        if (iRef !== -1) {
-            base.splice(iRef + 1, 0, 'reference_qr');
-            return base;
-        }
+        const iThank = base.indexOf('thank_you');
+        const at = iThank >= 0 ? iThank : base.length;
+        base.splice(at, 0, 'reference_qr');
+        return base;
     }
     return out;
 }
@@ -117,6 +118,10 @@ const DEFAULT_SALES = {
     showTotal: true,
     showTermsText: true,
     showThankYou: true,
+    /** Pulse cash drawer on ESC/POS when sale includes cash payment. */
+    openCashDrawerOnCashPayment: true,
+    /** 0 = pin 2 (most printers); 1 = pin 5 if drawer does not open on pin 0. */
+    cashDrawerPin: 0,
     showReceiptReferenceQr: true,
     receiptReferenceQrSizeMm: 22,
     sectionOrder: normalizeSalesReceiptSectionOrder(null),
@@ -155,7 +160,11 @@ function mergeReceiptPrinterSalesPrint(partial) {
             14,
             30,
             d.receiptReferenceQrSizeMm
-        )
+        ),
+        openCashDrawerOnCashPayment: p.openCashDrawerOnCashPayment !== false,
+        cashDrawerPin: p.cashDrawerPin === 1 ? 1 : 0,
+        paperWidthMm: clamp(p.paperWidthMm != null ? Number(p.paperWidthMm) : d.paperWidthMm, 58, 80, d.paperWidthMm),
+        sideMarginMm: clamp(p.sideMarginMm != null ? Number(p.sideMarginMm) : d.sideMarginMm, 2, 8, d.sideMarginMm)
     };
 }
 
