@@ -222,6 +222,40 @@ exports.updateNegativeStock = asyncHandler(async (req, res) => {
     });
 });
 
+// @desc    Update refund OTP threshold
+// @route   PUT /api/settings/general/refund-otp-threshold
+// @access  Private (settings.manage)
+exports.updateRefundOtpThreshold = asyncHandler(async (req, res) => {
+    const { refundOtpThreshold } = req.body;
+    const value = Number(refundOtpThreshold);
+    if (!Number.isFinite(value) || value < 0) {
+        return res.status(400).json({ success: false, message: 'refundOtpThreshold must be a non-negative number' });
+    }
+    let settings = await GeneralSettings.findOne();
+    if (!settings) {
+        settings = await GeneralSettings.create({});
+    }
+    const before = { refundOtpThreshold: typeof settings.refundOtpThreshold === 'number' ? settings.refundOtpThreshold : 50 };
+    settings.refundOtpThreshold = Math.round(value * 100) / 100;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    const after = { refundOtpThreshold: settings.refundOtpThreshold };
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-refund-otp-threshold',
+        success: true,
+        message: 'Refund OTP threshold updated',
+        diffJson: { before, after }
+    });
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+    res.status(200).json({
+        success: true,
+        message: 'Threshold updated',
+        data: { refundOtpThreshold: settings.refundOtpThreshold }
+    });
+});
+
 // --- Admin Google Authenticator (TOTP) for refund approval ---
 
 const TOTP_ISSUER = 'Inflix POS';
