@@ -217,3 +217,152 @@ exports.updateNegativeStock = asyncHandler(async (req, res) => {
         data
     });
 });
+<<<<<<< HEAD
+
+// @desc    Update refund OTP threshold
+// @route   PUT /api/settings/general/refund-otp-threshold
+// @access  Private (settings.manage)
+exports.updateRefundOtpThreshold = asyncHandler(async (req, res) => {
+    const { refundOtpThreshold } = req.body;
+    const value = Number(refundOtpThreshold);
+    if (!Number.isFinite(value) || value < 0) {
+        return res.status(400).json({ success: false, message: 'refundOtpThreshold must be a non-negative number' });
+    }
+    let settings = await GeneralSettings.findOne();
+    if (!settings) {
+        settings = await GeneralSettings.create({});
+    }
+    const before = { refundOtpThreshold: typeof settings.refundOtpThreshold === 'number' ? settings.refundOtpThreshold : 50 };
+    settings.refundOtpThreshold = Math.round(value * 100) / 100;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    const after = { refundOtpThreshold: settings.refundOtpThreshold };
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-refund-otp-threshold',
+        success: true,
+        message: 'Refund OTP threshold updated',
+        diffJson: { before, after }
+    });
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+    res.status(200).json({
+        success: true,
+        message: 'Threshold updated',
+        data: { refundOtpThreshold: settings.refundOtpThreshold }
+    });
+});
+
+// --- Admin Google Authenticator (TOTP) for refund approval ---
+
+const TOTP_ISSUER = 'Inflix POS';
+
+function verifyTotpCode(secretBase32, code) {
+    if (!secretBase32 || !code) return false;
+    const cleaned = String(code).replace(/\s+/g, '');
+    if (!/^\d{6}$/.test(cleaned)) return false;
+    return speakeasy.totp.verify({
+        secret: secretBase32,
+        encoding: 'base32',
+        token: cleaned,
+        window: 1
+    });
+}
+
+exports.verifyAdminTotpCode = verifyTotpCode;
+
+// @desc    Begin admin 2FA setup — returns a fresh secret + QR (does NOT enable yet)
+// @route   POST /api/settings/general/2fa/setup
+// @access  Private (settings.manage)
+exports.setupAdminTotp = asyncHandler(async (req, res) => {
+    const label = (req.user && (req.user.email || req.user.name)) || 'admin';
+    const secret = speakeasy.generateSecret({
+        length: 20,
+        name: `${TOTP_ISSUER} (${label})`,
+        issuer: TOTP_ISSUER
+    });
+    let settings = await GeneralSettings.findOne();
+    if (!settings) {
+        settings = await GeneralSettings.create({});
+    }
+    settings.adminTotpSecret = secret.base32;
+    settings.adminTotpEnabled = false;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+
+    const otpauthUrl = secret.otpauth_url;
+    const qrDataUrl = await qrcode.toDataURL(otpauthUrl);
+    res.status(200).json({
+        success: true,
+        data: {
+            otpauthUrl,
+            qrDataUrl,
+            secret: secret.base32
+        }
+    });
+});
+
+// @desc    Confirm setup by submitting the first code from Google Authenticator — enables 2FA
+// @route   POST /api/settings/general/2fa/verify-enable
+// @access  Private (settings.manage)
+exports.verifyAndEnableAdminTotp = asyncHandler(async (req, res) => {
+    const { code } = req.body || {};
+    const settings = await GeneralSettings.getSettings();
+    if (!settings.adminTotpSecret) {
+        return res.status(400).json({ success: false, message: 'Start setup first to generate a secret' });
+    }
+    if (!verifyTotpCode(settings.adminTotpSecret, code)) {
+        return res.status(400).json({ success: false, message: 'Invalid code — open Google Authenticator and try the current 6-digit code' });
+    }
+    settings.adminTotpEnabled = true;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-admin-totp',
+        success: true,
+        message: 'Admin Google Authenticator enabled'
+    });
+    res.status(200).json({
+        success: true,
+        message: 'Google Authenticator enabled',
+        data: { adminTotpEnabled: true }
+    });
+});
+
+// @desc    Disable admin 2FA (clears the stored secret). Requires a current valid code if currently enabled.
+// @route   POST /api/settings/general/2fa/disable
+// @access  Private (settings.manage)
+exports.disableAdminTotp = asyncHandler(async (req, res) => {
+    const { code } = req.body || {};
+    const settings = await GeneralSettings.getSettings();
+    if (settings.adminTotpEnabled) {
+        if (!verifyTotpCode(settings.adminTotpSecret, code)) {
+            return res.status(400).json({ success: false, message: 'Enter a valid current code to disable 2FA' });
+        }
+    }
+    settings.adminTotpSecret = null;
+    settings.adminTotpEnabled = false;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-admin-totp',
+        success: true,
+        message: 'Admin Google Authenticator disabled'
+    });
+    res.status(200).json({
+        success: true,
+        message: 'Google Authenticator disabled',
+        data: { adminTotpEnabled: false }
+    });
+});
+=======
+>>>>>>> 691dc86c5ee9cf77e6201fb400f473562185f26d
