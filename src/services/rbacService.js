@@ -20,7 +20,7 @@ const ALL_PERMISSION_KEYS = [
     'customer.view', 'customer.create', 'customer.edit',
     'accounts.view', 'accounts.payment',
     'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
-    'settings.view', 'settings.edit', 'settings.manage', 'settings.printing',
+    'settings.view', 'settings.edit', 'settings.manage', 'settings.printing', 'settings.sales_mode',
     'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
     'expense_category.view', 'expense_category.manage',
     'expense.view', 'expense.create', 'expense.edit_draft', 'expense.submit',
@@ -168,13 +168,15 @@ async function attachPermissionKeys(user) {
             ALL_PERMISSION_KEYS.forEach((k) => keys.add(k));
         } else if (LEGACY_TILL_ROLES.has(legacyRole)) {
             keys.add('settings.printing');
+            keys.add('settings.sales_mode');
         }
         role = legacyRole;
     }
 
-    // All RBAC roles: silent printing is granted to every role in DB; enforce if seed lagged.
+    // All RBAC roles: printing + personal sales mode granted to every role in DB; enforce if seed lagged.
     if (roles.length > 0) {
         keys.add('settings.printing');
+        keys.add('settings.sales_mode');
     }
 
     setCached(userId, keys, role, roles);

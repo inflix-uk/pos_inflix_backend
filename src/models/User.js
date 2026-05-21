@@ -46,6 +46,8 @@ const userSchema = new mongoose.Schema({
     assignedLocationIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Location' }],
     /** Default location for new sales/repairs and report dashboard selection. */
     defaultLocationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Location', default: null },
+    /** Personal retail (walk-in) vs wholesale preference; null = use company default from GeneralSettings */
+    preferredRetailModeEnabled: { type: Boolean, default: null },
     /** Tenant identity for SaaS; source of truth for entitlements and scoping. */
     tenantId: { type: String, required: true, default: 'default', trim: true, maxlength: [128, 'Tenant ID cannot exceed 128 characters'] }
 }, {

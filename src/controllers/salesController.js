@@ -611,8 +611,9 @@ exports.updateSale = asyncHandler(async (req, res) => {
         sale.amountDue = body.amountDue;
     }
     if (sale.type === 'wholesale' && body.payments) {
-        const generalSettings = await GeneralSettings.getSettings();
-        if (generalSettings.retailModeEnabled) {
+        const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
+        const retailModeActive = await getEffectiveRetailModeEnabled(req.user._id);
+        if (retailModeActive) {
             const credit = round2(Number(body.payments.credit) || 0);
             if (credit > 0.01) {
                 return res.status(400).json({
@@ -1197,7 +1198,9 @@ exports.createSale = asyncHandler(async (req, res) => {
 
     // Retail mode (walk-in): enforce full payment, no credit, use Walk-in customer if none
     const generalSettings = await GeneralSettings.getSettings();
-    if (body.type === 'wholesale' && generalSettings.retailModeEnabled) {
+    const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
+    const retailModeActive = await getEffectiveRetailModeEnabled(req.user._id);
+    if (body.type === 'wholesale' && retailModeActive) {
         const creditAmount = round2(Number(saleData.payments?.credit) || 0);
         if (creditAmount > 0.01) {
             return res.status(400).json({

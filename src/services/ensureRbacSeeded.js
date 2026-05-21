@@ -54,6 +54,7 @@ const PERMISSIONS = [
     { key: 'settings.edit', description: 'Edit settings', group: 'Settings' },
     { key: 'settings.manage', description: 'Manage company-wide settings (e.g. sales default account)', group: 'Settings' },
     { key: 'settings.printing', description: 'Configure silent printing on this device (Print Bridge, printers)', group: 'Settings' },
+    { key: 'settings.sales_mode', description: 'Choose retail vs wholesale sales mode for your account', group: 'Settings' },
     { key: 'repair.view', description: 'View repairs', group: 'Repairs' },
     { key: 'repair.create', description: 'Create repair', group: 'Repairs' },
     { key: 'repair.edit', description: 'Edit repair', group: 'Repairs' },
@@ -127,6 +128,20 @@ async function ensurePrintingPermissionOnRoles() {
     }
 }
 
+/** Grant settings.sales_mode to every role (staff can pick retail vs wholesale). Idempotent. */
+async function ensureSalesModePermissionOnRoles() {
+    const perm = await Permission.findOne({ key: 'settings.sales_mode' }).select('_id').lean();
+    if (!perm) return;
+    const result = await Role.updateMany(
+        {},
+        { $addToSet: { permissions: perm._id } }
+    );
+    if (result.modifiedCount > 0) {
+        const { invalidateAllPermissionCaches } = require('./rbacService');
+        invalidateAllPermissionCaches();
+    }
+}
+
 async function ensureRoles() {
     const count = await Role.countDocuments();
     if (count > 0) return;
@@ -139,12 +154,12 @@ async function ensureRoles() {
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
         'customer.view', 'customer.create', 'customer.edit', 'parcel.create', 'parcel.status_change',
         'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
-        'settings.printing'
+        'settings.printing', 'settings.sales_mode'
     ];
     const staffPermIds = await getPermissionIdsByKeys(staffKeys);
     const cashierKeys = [
         'sale.view', 'sale.create', 'return.create', 'product.view', 'customer.view', 'customer.create', 'customer.edit',
-        'settings.printing'
+        'settings.printing', 'settings.sales_mode'
     ];
     const cashierPermIds = await getPermissionIdsByKeys(cashierKeys);
     const warehouseKeys = [
@@ -213,6 +228,7 @@ function ensure() {
         const inserted = await ensurePermissions();
         await ensureRoles();
         await ensurePrintingPermissionOnRoles();
+        await ensureSalesModePermissionOnRoles();
         return { permissionsInserted: inserted };
     })().catch((err) => {
         ensureByTenant.delete(tenantKey);
@@ -222,4 +238,11 @@ function ensure() {
     return promise;
 }
 
-module.exports = { ensure, ensurePermissions, ensureRoles, ensurePrintingPermissionOnRoles, PERMISSIONS };
+module.exports = {
+    ensure,
+    ensurePermissions,
+    ensureRoles,
+    ensurePrintingPermissionOnRoles,
+    ensureSalesModePermissionOnRoles,
+    PERMISSIONS
+};

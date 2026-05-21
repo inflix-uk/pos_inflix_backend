@@ -142,6 +142,7 @@ router.use('/settings/email', emailSettingsRoutes);
 router.use('/settings/taxes', taxRoutes);
 router.use('/settings/inventory', inventorySettingsRoutes);
 router.use('/settings/general', generalSettingsRoutes);
+router.use('/settings/my-sales-mode', require('./userSalesModeRoutes'));
 router.use('/settings/printing', printingSettingsRoutes);
 router.use('/settings/header-quick-actions', headerQuickActionsRoutes);
 router.use('/purchases', purchaseRoutes);

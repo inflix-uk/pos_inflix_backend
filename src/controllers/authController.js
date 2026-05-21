@@ -230,6 +230,7 @@ exports.login = asyncHandler(async (req, res) => {
     const ensureRbac = require('../services/ensureRbacSeeded');
     await ensureRbac.ensure();
     await ensureRbac.ensurePrintingPermissionOnRoles();
+    await ensureRbac.ensureSalesModePermissionOnRoles();
 
     // Update last login
     user.lastLogin = Date.now();
@@ -292,10 +293,17 @@ exports.getMe = asyncHandler(async (req, res) => {
     const ensureRbac = require('../services/ensureRbacSeeded');
     await ensureRbac.ensure();
     await ensureRbac.ensurePrintingPermissionOnRoles();
+    await ensureRbac.ensureSalesModePermissionOnRoles();
     const rbacService = require('../services/rbacService');
+    const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
     rbacService.invalidateUserPermissionCache(req.user._id);
     await rbacService.attachPermissionKeys(req.user);
     const permissionKeys = req.user.permissionKeys ? Array.from(req.user.permissionKeys) : [];
+    const effectiveRetailModeEnabled = await getEffectiveRetailModeEnabled(req.user._id);
+    const preferredRetailModeEnabled =
+        typeof req.user.preferredRetailModeEnabled === 'boolean'
+            ? req.user.preferredRetailModeEnabled
+            : null;
     const assignedLocationIds = (req.user.assignedLocationIds || []).map((id) => (id && id.toString ? id.toString() : String(id)));
     const defaultLocationId = req.user.defaultLocationId ? (req.user.defaultLocationId.toString ? req.user.defaultLocationId.toString() : String(req.user.defaultLocationId)) : null;
     // isPlatformAdmin is set at login and stored in JWT token, no re-check needed
@@ -311,6 +319,8 @@ exports.getMe = asyncHandler(async (req, res) => {
         isPlatformAdmin: !!isPlatformAdmin,
         tenantId: req.user.tenantId != null ? String(req.user.tenantId) : 'default',
         suspended: false,
+        preferredRetailModeEnabled,
+        effectiveRetailModeEnabled,
     };
     res.status(200).json({
         success: true,
