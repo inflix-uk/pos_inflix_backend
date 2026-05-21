@@ -38,6 +38,99 @@ async function invalidateSalesCaches(tenantId) {
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
+const Supplier = require('../models/Supplier');
+
+/** Resolve customer or supplier account used on wholesale sales. */
+async function resolveWholesaleSaleAccount(accountId, tenantId) {
+    if (!accountId) return null;
+    const c = await Customer.findOne({ _id: accountId, tenantId }).select('_id name').lean();
+    if (c) return { id: c._id, name: c.name, accountModel: 'Customer', hasCustomerLedger: true };
+    const s = await Supplier.findOne({ _id: accountId, tenantId }).select('_id name').lean();
+    if (s) return { id: s._id, name: s.name, accountModel: 'Supplier', hasCustomerLedger: false };
+    return null;
+}
+
+/** Apply or reverse wholesale sale customer ledger (+balance / sale + payment_in rows). sign: 1 apply, -1 reverse. */
+async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel, userId, sign) {
+    if (!accountId || accountModel !== 'Customer') return;
+    const orderTotal = round2(Number(sale.total) || 0);
+    const discount = round2(Number(sale.discount) || 0);
+    const netDue = round2(orderTotal - discount);
+    const p = sale.payments || {};
+    const paidNow = round2(
+        (Number(p.cash) || 0) + (Number(p.card) || 0) + (Number(p.bank) || 0)
+    );
+    const balanceChange = round2(sign * (netDue - paidNow));
+    const refLabel = sale.reference || `Sale ${sale._id}`;
+    const now = new Date();
+    const labelSuffix = sign < 0 ? 'Customer changed (removed)' : 'Customer changed (assigned)';
+
+    await Customer.findByIdAndUpdate(accountId, { $inc: { balance: balanceChange } });
+
+    if (netDue > 0) {
+        await LedgerEntry.create({
+            accountType: 'customer',
+            accountId,
+            accountModel: 'Customer',
+            type: 'sale',
+            amount: round2(sign * netDue),
+            referenceId: sale._id,
+            referenceLabel: `${labelSuffix} - ${refLabel}`,
+            date: now,
+            occurredAt: now,
+            createdBy: userId
+        });
+    }
+    const cashAmt = round2(Number(p.cash) || 0);
+    const cardAmt = round2(Number(p.card) || 0);
+    const bankAmt = round2(Number(p.bank) || 0);
+    if (cashAmt > 0) {
+        await LedgerEntry.create({
+            accountType: 'customer',
+            accountId,
+            accountModel: 'Customer',
+            type: 'payment_in',
+            amount: round2(sign * -cashAmt),
+            referenceId: sale._id,
+            referenceLabel: `${refLabel} payment`,
+            date: now,
+            occurredAt: now,
+            paymentMethod: 'cash',
+            createdBy: userId
+        });
+    }
+    if (cardAmt > 0) {
+        await LedgerEntry.create({
+            accountType: 'customer',
+            accountId,
+            accountModel: 'Customer',
+            type: 'payment_in',
+            amount: round2(sign * -cardAmt),
+            referenceId: sale._id,
+            referenceLabel: `${refLabel} payment`,
+            date: now,
+            occurredAt: now,
+            paymentMethod: 'card',
+            createdBy: userId
+        });
+    }
+    if (bankAmt > 0) {
+        await LedgerEntry.create({
+            accountType: 'customer',
+            accountId,
+            accountModel: 'Customer',
+            type: 'payment_in',
+            amount: round2(sign * -bankAmt),
+            referenceId: sale._id,
+            referenceLabel: `${refLabel} payment`,
+            date: now,
+            occurredAt: now,
+            paymentMethod: 'bank',
+            createdBy: userId
+        });
+    }
+}
+
 /** Safe substring search for MongoDB $regex */
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -508,6 +601,10 @@ exports.updateSale = asyncHandler(async (req, res) => {
     const beforeSnapshot = sale.toObject();
 
     const body = req.body;
+    const oldCustomerIdAtStart = sale.customerId ? String(sale.customerId) : null;
+    let wholesaleCustomerTransferred = false;
+    let transferFromCustomerId = null;
+    let transferToCustomerId = null;
 
     // Capture old items for inventory reconciliation (before overwriting)
     const oldItems = (sale.items || []).map((i) => ({
@@ -644,6 +741,30 @@ exports.updateSale = asyncHandler(async (req, res) => {
         };
     }
 
+    if (sale.type === 'wholesale' && body.customerId !== undefined) {
+        const newCustomerId = body.customerId ? String(body.customerId) : null;
+        if (newCustomerId !== oldCustomerIdAtStart) {
+            if (newCustomerId) {
+                const acct = await resolveWholesaleSaleAccount(newCustomerId, tenantId);
+                if (!acct) {
+                    return res.status(400).json({ success: false, message: 'Customer or supplier account not found' });
+                }
+                sale.customerId = acct.id;
+                sale.customerName = (body.customerName && String(body.customerName).trim()) || acct.name;
+            } else {
+                sale.customerId = null;
+                sale.customerName = body.customerName ? String(body.customerName).trim() : null;
+            }
+            wholesaleCustomerTransferred = true;
+            transferFromCustomerId = oldCustomerIdAtStart;
+            transferToCustomerId = newCustomerId;
+        } else if (body.customerName != null && String(body.customerName).trim()) {
+            sale.customerName = String(body.customerName).trim();
+        }
+    } else if (sale.type === 'wholesale' && body.customerName != null && String(body.customerName).trim()) {
+        sale.customerName = String(body.customerName).trim();
+    }
+
     // Validate added serials are not already sold and not returned to supplier (before saving)
     if (newItems.length > 0) {
         const oldSerialsCheck = oldItems.flatMap((i) => i.serialNumbers || []);
@@ -758,9 +879,24 @@ exports.updateSale = asyncHandler(async (req, res) => {
     // Record corrections as NEW entries (adjustment) so history is immutable and auditable.
     const refLabel = sale.reference || `Sale ${sale._id}`;
     const now = new Date();
-    const userId = req.user?.id;
+    const userId = req.user?._id || req.user?.id;
 
-    if (sale.type === 'wholesale' && sale.customerId && body.payments) {
+    if (wholesaleCustomerTransferred) {
+        if (transferFromCustomerId) {
+            const oldAcct = await resolveWholesaleSaleAccount(transferFromCustomerId, tenantId);
+            if (oldAcct?.hasCustomerLedger) {
+                await postWholesaleCustomerLedgerForSale(sale, oldAcct.id, oldAcct.accountModel, userId, -1);
+            }
+        }
+        if (transferToCustomerId) {
+            const newAcct = await resolveWholesaleSaleAccount(transferToCustomerId, tenantId);
+            if (newAcct?.hasCustomerLedger) {
+                await postWholesaleCustomerLedgerForSale(sale, newAcct.id, newAcct.accountModel, userId, 1);
+            }
+        }
+    }
+
+    if (!wholesaleCustomerTransferred && sale.type === 'wholesale' && sale.customerId && body.payments) {
         const newPaymentTotal = round2(
             (Number(sale.payments.cash) || 0) + (Number(sale.payments.card) || 0) + (Number(sale.payments.bank) || 0)
         );
@@ -793,7 +929,7 @@ exports.updateSale = asyncHandler(async (req, res) => {
     const newTotal = round2(Number(sale.total) || 0);
     const newDiscount = round2(Number(sale.discount) || 0);
     const deltaTotal = round2((newTotal - newDiscount) - (prevTotal - prevDiscount));
-    if (sale.type === 'wholesale' && sale.customerId && deltaTotal !== 0) {
+    if (!wholesaleCustomerTransferred && sale.type === 'wholesale' && sale.customerId && deltaTotal !== 0) {
         await LedgerEntry.create({
             accountType: 'customer',
             accountId: sale.customerId,
