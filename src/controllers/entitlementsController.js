@@ -100,5 +100,6 @@ exports.getMyEntitlements = asyncHandler(async (req, res) => {
         expireDate
     };
     console.log('[getMyEntitlements] tenantId:', tenantId, '| status:', status, '| subscriptionType:', subscriptionType, '| planKey:', entitlements.planKey);
+    console.log(`[getMyEntitlements][sales/invoice] tenantId=${tenantId} served={sales:${entitlements.enabledFeatures.sales}, invoices:${entitlements.enabledFeatures.invoices}} source=${platformClient.isPlatformConfigured() ? 'platform-cache' : 'local-db'}`);
     res.status(200).json({ success: true, data: responseData });
 });

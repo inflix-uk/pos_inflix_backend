@@ -336,4 +336,9 @@ const optionalProtect = async (req, res, next) => {
     next();
 };
 
-module.exports = { protect, authorize, requirePermission, requirePerm, requireAnyPerm, requirePlatformAdmin, requirePlatformAuth, requireFeature, getTenantIdFromReq, requireTenantActive, optionalProtect };
+function invalidateAuthCaches(userId, tenantId) {
+    if (userId != null) _userCache.delete(String(userId));
+    if (tenantId != null && protect._suspensionCache) protect._suspensionCache.delete(`_susp_${tenantId}`);
+}
+
+module.exports = { protect, authorize, requirePermission, requirePerm, requireAnyPerm, requirePlatformAdmin, requirePlatformAuth, requireFeature, getTenantIdFromReq, requireTenantActive, optionalProtect, invalidateAuthCaches };

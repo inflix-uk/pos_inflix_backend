@@ -3,6 +3,10 @@ const User = require('../models/User');
 const asyncHandler = require('../middleware/asyncHandler');
 const activityLogService = require('../services/activityLogService');
 const { validatePassword } = require('../utils/passwordPolicy');
+const rbacService = require('../services/rbacService');
+const entitlementsService = require('../services/entitlementsService');
+const platformEntitlementsCache = require('../services/platformEntitlementsCache');
+const { invalidateAuthCaches } = require('../middleware/auth');
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -230,6 +234,19 @@ exports.login = asyncHandler(async (req, res) => {
     // Update last login
     user.lastLogin = Date.now();
     await user.save({ validateBeforeSave: false });
+
+    // Start fresh: clear every cache that could shadow the user's current RBAC + entitlements state.
+    // Done at login so any change made on the platform (role assignment, feature toggle, mutex flip)
+    // takes effect on the very next request the client makes.
+    try {
+        rbacService.invalidateUserCache(user._id);
+        entitlementsService.invalidateEntitlementsCache(user.tenantId);
+        platformEntitlementsCache.invalidate();
+        invalidateAuthCaches(user._id, user.tenantId);
+        console.log(`[login] caches invalidated for user=${user._id} tenantId=${user.tenantId}`);
+    } catch (cacheErr) {
+        console.warn('[login] cache invalidation failed (non-fatal):', cacheErr.message);
+    }
 
     // Check platform admin status at login (only checked here, stored in JWT token)
     const platformEmails = (process.env.PLATFORM_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
