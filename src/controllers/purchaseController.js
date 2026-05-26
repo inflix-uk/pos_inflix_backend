@@ -1926,11 +1926,12 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     const { purchaseId, itemId } = req.params;
     const quantity = req.body.quantity != null ? Number(req.body.quantity) : null;
     const salePrice = req.body.salePrice != null ? Number(req.body.salePrice) : null;
+    const purchasePrice = req.body.purchasePrice != null ? Number(req.body.purchasePrice) : null;
 
-    if (quantity === null && salePrice === null) {
+    if (quantity === null && salePrice === null && purchasePrice === null) {
         return res.status(400).json({
             success: false,
-            message: 'At least one of quantity or salePrice is required'
+            message: 'At least one of quantity, salePrice or purchasePrice is required'
         });
     }
     if (quantity !== null && !Number.isInteger(quantity)) {
@@ -1943,6 +1944,12 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
         return res.status(400).json({
             success: false,
             message: 'Sale price must be a non-negative number'
+        });
+    }
+    if (purchasePrice !== null && (typeof purchasePrice !== 'number' || isNaN(purchasePrice) || purchasePrice < 0)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Cost price must be a non-negative number'
         });
     }
 
@@ -1980,6 +1987,10 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
             item.salePrice = salePrice;
             purchase.markModified('items');
         }
+        if (purchasePrice !== null) {
+            item.purchasePrice = purchasePrice;
+            purchase.markModified('items');
+        }
         try {
             await purchase.save();
             lastError = null;
@@ -1997,9 +2008,9 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     const purchase = await Purchase.findOne({ _id: purchaseId, tenantId });
     const item = (purchase?.items || []).find((i) => String(i._id) === String(itemId));
 
-    // When salePrice was updated on a serial item, update SerialIndex (and Redis) in the background so the response returns fast.
+    // When salePrice or purchasePrice was updated on a serial item, update SerialIndex (and Redis) in the background so the response returns fast.
     // Serial lookup with no pricing group uses legacy (DB) for price, so the correct price is always from the purchase document.
-    if (salePrice !== null && Array.isArray(item.imeis) && item.imeis.length > 0) {
+    if ((salePrice !== null || purchasePrice !== null) && Array.isArray(item.imeis) && item.imeis.length > 0) {
         const parts = [item.brand, item.brandModel, item.capacity, item.colour].filter(Boolean);
         const productNameSnapshot = parts.length > 0 ? parts.join(' ') : (item.name && String(item.name).trim() ? String(item.name).trim() : 'Product');
         const skuSnapshot = `${purchase._id}-${item._id}`;

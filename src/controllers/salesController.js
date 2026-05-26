@@ -347,6 +347,7 @@ exports.getSales = asyncHandler(async (req, res) => {
         hasReturn: req.query.hasReturn || null,
         search: req.query.search || null,
         order: req.query.order || null,
+        includeItems: req.query.includeItems === 'true' ? '1' : null,
     };
 
     const payload = await cache.cached(
@@ -470,7 +471,8 @@ exports.getSales = asyncHandler(async (req, res) => {
         .sort({ createdAt: sortOrder })
         .skip(startIndex)
         .limit(limit);
-    if (!searchStr) {
+    const includeItems = req.query.includeItems === 'true';
+    if (!searchStr && !includeItems) {
         salesQuery.select('-items');
     }
     salesQuery.lean();
