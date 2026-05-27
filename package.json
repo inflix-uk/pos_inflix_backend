@@ -43,6 +43,7 @@
   "author": "Inflix",
   "license": "ISC",
   "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.23",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.9.0",
     "compression": "^1.8.1",

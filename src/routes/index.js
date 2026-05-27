@@ -168,5 +168,6 @@ router.use('/platform-connection', platformConnectionRoutes);
 router.use('/entitlements', entitlementsRoutes);
 router.use('/pricing-groups', pricingGroupRoutes);
 router.use('/customer-portal', customerPortalRoutes);
+router.use('/whatsapp', require('./whatsappRoutes'));
 
 module.exports = router;
