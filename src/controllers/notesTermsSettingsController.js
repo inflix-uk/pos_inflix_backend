@@ -39,7 +39,10 @@ exports.saveNotesTermsSettings = asyncHandler(async (req, res) => {
         receiptPrinterRepairPrint,
         paymentNote,
         repairLabelPrint,
-        invoicePdfPrint
+        invoicePdfPrint,
+        businessInvoicePdfPrint,
+        businessInvoiceTerms,
+        a4InvoiceTemplate
     } = req.body;
 
     // Check if settings exist
@@ -60,6 +63,9 @@ exports.saveNotesTermsSettings = asyncHandler(async (req, res) => {
                 ...(receiptPrinterSalesPrint !== undefined ? { receiptPrinterSalesPrint } : {}),
                 ...(receiptPrinterRepairPrint !== undefined ? { receiptPrinterRepairPrint } : {}),
                 ...(invoicePdfPrint !== undefined ? { invoicePdfPrint } : {}),
+                ...(businessInvoicePdfPrint !== undefined ? { businessInvoicePdfPrint } : {}),
+                ...(businessInvoiceTerms !== undefined ? { businessInvoiceTerms } : {}),
+                ...(a4InvoiceTemplate !== undefined ? { a4InvoiceTemplate } : {}),
                 updatedBy: req.user._id
             },
             {
@@ -87,6 +93,9 @@ exports.saveNotesTermsSettings = asyncHandler(async (req, res) => {
             ...(receiptPrinterSalesPrint !== undefined ? { receiptPrinterSalesPrint } : {}),
             ...(receiptPrinterRepairPrint !== undefined ? { receiptPrinterRepairPrint } : {}),
             ...(invoicePdfPrint !== undefined ? { invoicePdfPrint } : {}),
+            ...(businessInvoicePdfPrint !== undefined ? { businessInvoicePdfPrint } : {}),
+            ...(businessInvoiceTerms !== undefined ? { businessInvoiceTerms } : {}),
+            ...(a4InvoiceTemplate !== undefined ? { a4InvoiceTemplate } : {}),
             createdBy: req.user._id
         });
 

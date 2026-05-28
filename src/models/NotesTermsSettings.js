@@ -97,6 +97,8 @@ const repairLabelPrintSchema = new mongoose.Schema({
 
 const invoicePdfPrintSchema = new mongoose.Schema({
     showLogo: { type: Boolean, default: true },
+    /** Company / branch name in header and FROM (About app name or location name). */
+    showCompanyName: { type: Boolean, default: true },
     showBillTo: { type: Boolean, default: true },
     showItemsSummary: { type: Boolean, default: true },
     showSerialDetails: { type: Boolean, default: true },
@@ -116,7 +118,15 @@ const invoicePdfPrintSchema = new mongoose.Schema({
     logoWidthMm: { type: Number, default: 32, min: 20, max: 45 },
     logoHeightMm: { type: Number, default: 13, min: 8, max: 22 },
     showInvoiceReferenceQr: { type: Boolean, default: true },
-    invoiceReferenceQrSizeMm: { type: Number, default: 22, min: 16, max: 32 }
+    invoiceReferenceQrSizeMm: { type: Number, default: 22, min: 16, max: 32 },
+    /** Business invoice PDF title (e.g. INVOICE, TAX INVOICE). Dispatch template ignores this. */
+    documentTitle: { type: String, trim: true, maxlength: 80, default: 'INVOICE' },
+    /** Business invoice only — shown when set in Settings → About */
+    showCompanyNumber: { type: Boolean, default: true },
+    showVatNumber: { type: Boolean, default: true },
+    showFooterLegalLine: { type: Boolean, default: true },
+    /** Business invoice: VAT / tax lines from Settings → Tax and sale.tax */
+    showTax: { type: Boolean, default: true }
 }, { _id: false });
 
 const defaultTerms = `*30 Days Limited Warranty
@@ -179,6 +189,22 @@ const notesTermsSettingsSchema = new mongoose.Schema({
     invoicePdfPrint: {
         type: invoicePdfPrintSchema,
         default: undefined
+    },
+    businessInvoicePdfPrint: {
+        type: invoicePdfPrintSchema,
+        default: undefined
+    },
+    businessInvoiceTerms: {
+        type: String,
+        trim: true,
+        maxlength: [5000, 'Business invoice terms cannot exceed 5000 characters'],
+        default: ''
+    },
+    /** Which A4 PDF layout is used when printing/downloading from sales (dispatch vs business). */
+    a4InvoiceTemplate: {
+        type: String,
+        enum: ['dispatch', 'business'],
+        default: 'dispatch'
     },
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
