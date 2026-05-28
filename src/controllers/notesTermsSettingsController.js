@@ -3,6 +3,68 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const { normalizeBusinessInvoicePdfPrint } = require('../lib/normalizeBusinessInvoicePdfPrint');
+
+function attachNotesTermsPayload(settings) {
+    const doc = settings.toObject ? settings.toObject() : settings;
+    if (doc.businessInvoicePdfPrint) {
+        doc.businessInvoicePdfPrint = normalizeBusinessInvoicePdfPrint(doc.businessInvoicePdfPrint);
+    }
+    return doc;
+}
+
+function applyNotesTermsFields(settings, body, userId, { isCreate = false } = {}) {
+    const {
+        deliveryAddress,
+        purchaseTermsConditions,
+        pdfSalesTerms,
+        receiptPrinterSalesTerms,
+        receiptPrinterRepairTerms,
+        receiptPrinterSalesPrint,
+        receiptPrinterRepairPrint,
+        paymentNote,
+        repairLabelPrint,
+        invoicePdfPrint,
+        businessInvoicePdfPrint,
+        businessInvoiceTerms,
+        a4InvoiceTemplate
+    } = body;
+
+    if (deliveryAddress !== undefined) settings.deliveryAddress = deliveryAddress;
+    if (purchaseTermsConditions !== undefined) settings.purchaseTermsConditions = purchaseTermsConditions;
+    if (pdfSalesTerms !== undefined) settings.pdfSalesTerms = pdfSalesTerms;
+    if (receiptPrinterSalesTerms !== undefined) settings.receiptPrinterSalesTerms = receiptPrinterSalesTerms;
+    if (receiptPrinterRepairTerms !== undefined) settings.receiptPrinterRepairTerms = receiptPrinterRepairTerms;
+    if (paymentNote !== undefined) settings.paymentNote = paymentNote;
+    if (repairLabelPrint !== undefined) {
+        settings.repairLabelPrint = repairLabelPrint;
+        settings.markModified('repairLabelPrint');
+    }
+    if (receiptPrinterSalesPrint !== undefined) {
+        settings.receiptPrinterSalesPrint = receiptPrinterSalesPrint;
+        settings.markModified('receiptPrinterSalesPrint');
+    }
+    if (receiptPrinterRepairPrint !== undefined) {
+        settings.receiptPrinterRepairPrint = receiptPrinterRepairPrint;
+        settings.markModified('receiptPrinterRepairPrint');
+    }
+    if (invoicePdfPrint !== undefined) {
+        settings.invoicePdfPrint = invoicePdfPrint;
+        settings.markModified('invoicePdfPrint');
+    }
+    if (businessInvoicePdfPrint !== undefined) {
+        settings.businessInvoicePdfPrint = normalizeBusinessInvoicePdfPrint(businessInvoicePdfPrint);
+        settings.markModified('businessInvoicePdfPrint');
+    }
+    if (businessInvoiceTerms !== undefined) settings.businessInvoiceTerms = businessInvoiceTerms;
+    if (a4InvoiceTemplate !== undefined) settings.a4InvoiceTemplate = a4InvoiceTemplate;
+
+    if (isCreate) {
+        settings.createdBy = userId;
+    } else {
+        settings.updatedBy = userId;
+    }
+}
 
 const NOTES_TERMS_NS = 'settings:notesTerms';
 async function invalidateNotesTermsCache(tenantId) {
@@ -21,7 +83,7 @@ exports.getNotesTermsSettings = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
-        data: settings
+        data: attachNotesTermsPayload(settings)
     });
 });
 
@@ -29,81 +91,28 @@ exports.getNotesTermsSettings = asyncHandler(async (req, res) => {
 // @route   POST /api/settings/notes-terms
 // @access  Private/Admin/Manager
 exports.saveNotesTermsSettings = asyncHandler(async (req, res) => {
-    const {
-        deliveryAddress,
-        purchaseTermsConditions,
-        pdfSalesTerms,
-        receiptPrinterSalesTerms,
-        receiptPrinterRepairTerms,
-        receiptPrinterSalesPrint,
-        receiptPrinterRepairPrint,
-        paymentNote,
-        repairLabelPrint,
-        invoicePdfPrint,
-        businessInvoicePdfPrint,
-        businessInvoiceTerms,
-        a4InvoiceTemplate
-    } = req.body;
-
-    // Check if settings exist
     let settings = await NotesTermsSettings.findOne();
 
     if (settings) {
-        // Update existing settings
-        settings = await NotesTermsSettings.findByIdAndUpdate(
-            settings._id,
-            {
-                deliveryAddress,
-                purchaseTermsConditions,
-                pdfSalesTerms,
-                receiptPrinterSalesTerms,
-                receiptPrinterRepairTerms,
-                paymentNote,
-                ...(repairLabelPrint !== undefined ? { repairLabelPrint } : {}),
-                ...(receiptPrinterSalesPrint !== undefined ? { receiptPrinterSalesPrint } : {}),
-                ...(receiptPrinterRepairPrint !== undefined ? { receiptPrinterRepairPrint } : {}),
-                ...(invoicePdfPrint !== undefined ? { invoicePdfPrint } : {}),
-                ...(businessInvoicePdfPrint !== undefined ? { businessInvoicePdfPrint } : {}),
-                ...(businessInvoiceTerms !== undefined ? { businessInvoiceTerms } : {}),
-                ...(a4InvoiceTemplate !== undefined ? { a4InvoiceTemplate } : {}),
-                updatedBy: req.user._id
-            },
-            {
-                new: true,
-                runValidators: true
-            }
-        );
+        applyNotesTermsFields(settings, req.body, req.user._id);
+        await settings.save();
 
         await invalidateNotesTermsCache(getTenantIdFromReq(req));
         res.status(200).json({
             success: true,
             message: 'Notes & Terms settings updated successfully',
-            data: settings
+            data: attachNotesTermsPayload(settings)
         });
     } else {
-        // Create new settings
-        settings = await NotesTermsSettings.create({
-            deliveryAddress,
-            purchaseTermsConditions,
-            pdfSalesTerms,
-            receiptPrinterSalesTerms,
-            receiptPrinterRepairTerms,
-            paymentNote,
-            ...(repairLabelPrint !== undefined ? { repairLabelPrint } : {}),
-            ...(receiptPrinterSalesPrint !== undefined ? { receiptPrinterSalesPrint } : {}),
-            ...(receiptPrinterRepairPrint !== undefined ? { receiptPrinterRepairPrint } : {}),
-            ...(invoicePdfPrint !== undefined ? { invoicePdfPrint } : {}),
-            ...(businessInvoicePdfPrint !== undefined ? { businessInvoicePdfPrint } : {}),
-            ...(businessInvoiceTerms !== undefined ? { businessInvoiceTerms } : {}),
-            ...(a4InvoiceTemplate !== undefined ? { a4InvoiceTemplate } : {}),
-            createdBy: req.user._id
-        });
+        settings = new NotesTermsSettings();
+        applyNotesTermsFields(settings, req.body, req.user._id, { isCreate: true });
+        await settings.save();
 
         await invalidateNotesTermsCache(getTenantIdFromReq(req));
         res.status(201).json({
             success: true,
             message: 'Notes & Terms settings created successfully',
-            data: settings
+            data: attachNotesTermsPayload(settings)
         });
     }
 });
@@ -136,7 +145,7 @@ exports.updateNotesTermsSettings = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'Notes & Terms settings updated successfully',
-        data: settings
+        data: attachNotesTermsPayload(settings)
     });
 });
 
@@ -164,6 +173,6 @@ exports.deleteNotesTermsSettings = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'Notes & Terms settings reset to defaults successfully',
-        data: newSettings
+        data: attachNotesTermsPayload(newSettings)
     });
 });
