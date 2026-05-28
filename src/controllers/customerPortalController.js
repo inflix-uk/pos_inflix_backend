@@ -265,11 +265,16 @@ exports.getInvoicePrintData = asyncHandler(async (req, res) => {
                     companyAddress: (about && about.companyAddress) || '',
                     logo: (about && about.logo) || null,
                     invoicePdfTitle: (about && about.invoicePdfTitle) || 'INVOICE',
+                    companyNumber: (about && about.companyNumber) || '',
+                    vatNumber: (about && about.vatNumber) || '',
                 },
                 notesTerms: {
                     pdfSalesTerms: (notesTerms && notesTerms.pdfSalesTerms) || '',
                     paymentNote: (notesTerms && notesTerms.paymentNote) || '',
                     invoicePdfPrint: (notesTerms && notesTerms.invoicePdfPrint) || null,
+                    businessInvoicePdfPrint: (notesTerms && notesTerms.businessInvoicePdfPrint) || null,
+                    businessInvoiceTerms: (notesTerms && notesTerms.businessInvoiceTerms) || '',
+                    a4InvoiceTemplate: (notesTerms && notesTerms.a4InvoiceTemplate) || 'dispatch',
                 },
                 bankAccounts: []
             }

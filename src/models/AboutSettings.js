@@ -31,6 +31,18 @@ const aboutSettingsSchema = new mongoose.Schema({
         maxlength: [500, 'Company address cannot exceed 500 characters'],
         default: 'Manchester'
     },
+    companyNumber: {
+        type: String,
+        trim: true,
+        maxlength: [50, 'Company number cannot exceed 50 characters'],
+        default: ''
+    },
+    vatNumber: {
+        type: String,
+        trim: true,
+        maxlength: [50, 'VAT number cannot exceed 50 characters'],
+        default: ''
+    },
     orderPdfTitle: {
         type: String,
         trim: true,

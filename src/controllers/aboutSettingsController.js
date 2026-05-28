@@ -36,6 +36,8 @@ exports.saveAboutSettings = asyncHandler(async (req, res) => {
         logo,
         loginPageTitle,
         companyAddress,
+        companyNumber,
+        vatNumber,
         orderPdfTitle,
         invoicePdfTitle
     } = req.body;
@@ -53,6 +55,8 @@ exports.saveAboutSettings = asyncHandler(async (req, res) => {
                 logo,
                 loginPageTitle,
                 companyAddress,
+                companyNumber: companyNumber ?? '',
+                vatNumber: vatNumber ?? '',
                 orderPdfTitle,
                 invoicePdfTitle,
                 updatedBy: req.user._id
@@ -77,6 +81,8 @@ exports.saveAboutSettings = asyncHandler(async (req, res) => {
             logo,
             loginPageTitle,
             companyAddress,
+            companyNumber: companyNumber ?? '',
+            vatNumber: vatNumber ?? '',
             orderPdfTitle,
             invoicePdfTitle,
             createdBy: req.user._id

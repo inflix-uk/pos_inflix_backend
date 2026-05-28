@@ -52,11 +52,11 @@ async function resolveLocationForPrint(saleLocationId) {
     let location = null;
     if (saleLocationId) {
         location = await Location.findById(saleLocationId)
-            .select('name address city postcode country phone email contactPerson')
+            .select('name address city postcode country phone email contactPerson companyNumber vatNumber')
             .lean();
     }
     if (!location) {
-        const first = await Location.findOne({ isActive: true }).sort({ name: 1 }).select('name address city postcode country phone email contactPerson').lean();
+        const first = await Location.findOne({ isActive: true }).sort({ name: 1 }).select('name address city postcode country phone email contactPerson companyNumber vatNumber').lean();
         location = first;
     }
     if (!location) {
@@ -71,7 +71,9 @@ async function resolveLocationForPrint(saleLocationId) {
             country: location.country || '',
             phone: location.phone || '',
             email: location.email || '',
-            contactPerson: location.contactPerson || ''
+            contactPerson: location.contactPerson || '',
+            companyNumber: location.companyNumber || '',
+            vatNumber: location.vatNumber || ''
         },
         fallbackLabel: null
     };

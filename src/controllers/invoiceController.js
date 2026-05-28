@@ -44,7 +44,7 @@ const getInvoices = asyncHandler(async (req, res) => {
 
     const [items, total] = await Promise.all([
         Invoice.find(query)
-            .sort({ createdAt: -1 })
+            .sort({ occurredAt: -1, createdAt: -1 })
             .skip((pageNum - 1) * pageSize)
             .limit(pageSize)
             .lean(),
@@ -94,7 +94,7 @@ const createInvoice = asyncHandler(async (req, res) => {
         bankAccount: body.bankAccount || '',
         paymentMethod: body.paymentMethod,
         soldBy: req.user ? req.user._id : null,
-        occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
+        occurredAt: body.occurredAt ? new Date(body.occurredAt) : null,
         locationId: body.locationId || null,
         tenantId,
         note: body.note || '',

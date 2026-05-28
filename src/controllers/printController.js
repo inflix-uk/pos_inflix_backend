@@ -1,4 +1,5 @@
 const Sale = require('../models/Sale');
+const Invoice = require('../models/Invoice');
 const AboutSettings = require('../models/AboutSettings');
 const NotesTermsSettings = require('../models/NotesTermsSettings');
 const asyncHandler = require('../middleware/asyncHandler');
@@ -94,6 +95,10 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
 exports.getSalePrintContext = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
     let sale = await Sale.findById(req.params.saleId).lean();
+    if (!sale) {
+        const invoice = await Invoice.findById(req.params.saleId).lean();
+        if (invoice) sale = invoice;
+    }
     if (!sale) {
         return res.status(404).json({ success: false, message: 'Sale not found' });
     }

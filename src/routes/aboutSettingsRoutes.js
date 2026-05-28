@@ -59,6 +59,14 @@ const aboutSettingsValidation = [
         .optional()
         .isLength({ max: 500 })
         .withMessage('Company address cannot exceed 500 characters'),
+    body('companyNumber')
+        .optional()
+        .isLength({ max: 50 })
+        .withMessage('Company number cannot exceed 50 characters'),
+    body('vatNumber')
+        .optional()
+        .isLength({ max: 50 })
+        .withMessage('VAT number cannot exceed 50 characters'),
     body('orderPdfTitle')
         .optional()
         .isLength({ max: 100 })
