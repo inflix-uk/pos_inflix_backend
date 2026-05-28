@@ -14,6 +14,122 @@ async function invalidateRepairCaches(tenantId) {
 
 const round2 = (n) => (n != null && typeof n === 'number' ? Math.round(n * 100) / 100 : null);
 
+function formatProblemTypeFromProblems(problems) {
+    if (!Array.isArray(problems) || problems.length === 0) return '';
+    return problems
+        .map((p) => {
+            const label = (p.label || '').trim();
+            if (!label) return '';
+            const cost = p.estimatedCost != null && Number.isFinite(Number(p.estimatedCost))
+                ? round2(Number(p.estimatedCost))
+                : null;
+            return cost != null && cost > 0 ? `${label} (£${cost.toFixed(2)})` : label;
+        })
+        .filter(Boolean)
+        .join(', ');
+}
+
+function sumProblemEstimates(problems) {
+    if (!Array.isArray(problems) || problems.length === 0) return null;
+    let sum = 0;
+    let any = false;
+    for (const p of problems) {
+        const n = Number(p.estimatedCost);
+        if (Number.isFinite(n) && n > 0) {
+            sum += n;
+            any = true;
+        }
+    }
+    return any ? round2(sum) : null;
+}
+
+function normalizeDeviceProblemsInput(device) {
+    const d = { ...device };
+    let problems = Array.isArray(d.problems)
+        ? d.problems
+            .map((p) => ({
+                label: (p.label || '').trim(),
+                estimatedCost:
+                    p.estimatedCost != null && p.estimatedCost !== '' && Number.isFinite(Number(p.estimatedCost))
+                        ? round2(Math.max(0, Number(p.estimatedCost)))
+                        : null
+            }))
+            .filter((p) => p.label)
+        : [];
+
+    if (problems.length === 0 && d.problemType) {
+        problems = String(d.problemType)
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((label) => ({ label, estimatedCost: null }));
+    }
+
+    if (problems.length > 0) {
+        d.problems = problems;
+        d.problemType = formatProblemTypeFromProblems(problems) || d.problemType || '';
+        const fromProblems = sumProblemEstimates(problems);
+        if (fromProblems != null) d.estimatedCost = fromProblems;
+    }
+
+    return d;
+}
+
+function normalizeDevicesInput(devices) {
+    if (!Array.isArray(devices) || devices.length === 0) return devices;
+    return devices.map((device) => normalizeDeviceProblemsInput(device));
+}
+
+function mapDeviceForApi(d) {
+    const problems = Array.isArray(d.problems)
+        ? d.problems.map((p) => ({
+            label: (p.label || '').trim(),
+            estimatedCost: p.estimatedCost != null ? round2(p.estimatedCost) : null
+        })).filter((p) => p.label)
+        : [];
+    const fromProblems = sumProblemEstimates(problems);
+    const estimatedCost = fromProblems != null ? fromProblems : round2(d.estimatedCost);
+    return {
+        deviceDescription: d.deviceDescription || '',
+        serialNumber: d.serialNumber || '',
+        problemType: d.problemType || (problems.length > 0 ? formatProblemTypeFromProblems(problems) : ''),
+        problems,
+        devicePassword: d.devicePassword || '',
+        estimatedCost,
+        notes: d.notes || ''
+    };
+}
+
+function mapDevicesForApi(repair) {
+    if (repair.devices && repair.devices.length > 0) {
+        return repair.devices.map((d) => mapDeviceForApi(d));
+    }
+    return [mapDeviceForApi({
+        deviceDescription: repair.deviceDescription || '',
+        serialNumber: repair.serialNumber || '',
+        problemType: repair.problemType || '',
+        devicePassword: repair.devicePassword || '',
+        estimatedCost: repair.estimatedCost,
+        notes: repair.notes || ''
+    })];
+}
+
+function syncLegacyFieldsFromDevices(devices) {
+    if (!Array.isArray(devices) || devices.length === 0) return {};
+    const normalized = normalizeDevicesInput(devices);
+    const first = normalized[0];
+    const ticketEst = normalized.reduce((sum, d) => sum + (Number(d.estimatedCost) || 0), 0);
+    return {
+        devices: normalized,
+        deviceDescription: (first.deviceDescription && first.deviceDescription.trim()) ? first.deviceDescription.trim() : '',
+        serialNumber: (first.serialNumber && first.serialNumber.trim()) ? first.serialNumber.trim() : '',
+        problemType: first.problemType || '',
+        devicePassword: (first.devicePassword && first.devicePassword.trim()) ? first.devicePassword.trim() : '',
+        estimatedCost: ticketEst > 0 ? round2(ticketEst) : (first.estimatedCost != null ? first.estimatedCost : null),
+        notes: (first.notes && first.notes.trim()) ? first.notes.trim() : ''
+    };
+}
+
 /** Amount due for a repair: sum of repairItems, or actualCost, or 0 */
 function getRepairAmountDue(repair) {
     if (repair.repairItems && Array.isArray(repair.repairItems) && repair.repairItems.length > 0) {
@@ -168,23 +284,7 @@ exports.getRepair = asyncHandler(async (req, res) => {
     const totalTaken = payments.length > 0 ? payments.reduce((sum, p) => sum + (p.total || 0), 0) : 0;
     const sale = payments.length > 0 ? payments[payments.length - 1] : null;
 
-    const devices = (repair.devices && repair.devices.length > 0)
-        ? repair.devices.map((d) => ({
-            deviceDescription: d.deviceDescription,
-            serialNumber: d.serialNumber || '',
-            problemType: d.problemType || '',
-            devicePassword: d.devicePassword || '',
-            estimatedCost: round2(d.estimatedCost),
-            notes: d.notes || ''
-        }))
-        : [{
-            deviceDescription: repair.deviceDescription || '',
-            serialNumber: repair.serialNumber || '',
-            problemType: repair.problemType || '',
-            devicePassword: repair.devicePassword || '',
-            estimatedCost: round2(repair.estimatedCost),
-            notes: repair.notes || ''
-        }];
+    const devices = mapDevicesForApi(repair);
 
     const data = {
         ...repair,
@@ -278,8 +378,13 @@ exports.createRepair = asyncHandler(async (req, res) => {
         }
     }
 
+    const createBody = { ...req.body };
+    if (createBody.devices && Array.isArray(createBody.devices)) {
+        Object.assign(createBody, syncLegacyFieldsFromDevices(createBody.devices));
+    }
+
     const repair = await Repair.create({
-        ...req.body,
+        ...createBody,
         locationId: locationId,
         createdBy: req.user?._id,
         tenantId
@@ -355,13 +460,7 @@ exports.updateRepair = asyncHandler(async (req, res) => {
         update.collectedAt = new Date();
     }
     if (update.devices && Array.isArray(update.devices) && update.devices.length > 0) {
-        const first = update.devices[0];
-        update.deviceDescription = (first.deviceDescription && first.deviceDescription.trim()) ? first.deviceDescription.trim() : '';
-        update.serialNumber = (first.serialNumber && first.serialNumber.trim()) ? first.serialNumber.trim() : '';
-        update.problemType = (first.problemType && first.problemType.trim()) ? first.problemType.trim() : '';
-        update.devicePassword = (first.devicePassword && first.devicePassword.trim()) ? first.devicePassword.trim() : '';
-        update.estimatedCost = first.estimatedCost != null ? Number(first.estimatedCost) : null;
-        update.notes = (first.notes && first.notes.trim()) ? first.notes.trim() : '';
+        Object.assign(update, syncLegacyFieldsFromDevices(update.devices));
     }
 
     repair = await Repair.findOneAndUpdate(repairQuery, update, {
@@ -383,23 +482,7 @@ exports.updateRepair = asyncHandler(async (req, res) => {
 
     const out = repair ? {
         ...repair,
-        devices: (repair.devices && repair.devices.length > 0)
-            ? repair.devices.map((d) => ({
-                deviceDescription: d.deviceDescription || '',
-                serialNumber: d.serialNumber || '',
-                problemType: d.problemType || '',
-                devicePassword: d.devicePassword || '',
-                estimatedCost: round2(d.estimatedCost),
-                notes: d.notes || ''
-            }))
-            : [{
-                deviceDescription: repair.deviceDescription || '',
-                serialNumber: repair.serialNumber || '',
-                problemType: repair.problemType || '',
-                devicePassword: repair.devicePassword || '',
-                estimatedCost: round2(repair.estimatedCost),
-                notes: repair.notes || ''
-            }]
+        devices: mapDevicesForApi(repair)
     } : repair;
 
     await invalidateRepairCaches(tenantId);

@@ -17,6 +17,11 @@ const repairSchema = new mongoose.Schema({
         deviceDescription: { type: String, trim: true, default: '' },
         serialNumber: { type: String, trim: true, default: '' },
         problemType: { type: String, trim: true, default: '' },
+        /** Per-problem estimates (label + price); device estimatedCost is sum when set. */
+        problems: [{
+            label: { type: String, trim: true, required: true },
+            estimatedCost: { type: Number, default: null, min: 0 }
+        }],
         devicePassword: { type: String, trim: true, default: '' },
         estimatedCost: { type: Number, default: null, min: 0 },
         notes: { type: String, trim: true, default: '' }
