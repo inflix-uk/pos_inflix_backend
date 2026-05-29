@@ -9,7 +9,7 @@ const mongoose = require('mongoose');
 const Location = require('../src/models/Location');
 const Sale = require('../src/models/Sale');
 const { resolveLocationForPrint, getLocationAddressBlock, getLocationAddressLines } = require('../src/utils/printLocationHelper');
-const { buildReceiptEscpos, drawerKick, lineCharsForPaper, dividerLine } = require('../src/utils/escposReceipt');
+const { buildReceiptEscpos, drawerKick, lineCharsForPaper, dividerLine, expandReceiptTextLines } = require('../src/utils/escposReceipt');
 const { normalizeSalesReceiptSectionOrder } = require('../src/utils/receiptPrinterPrintOptions');
 const printController = require('../src/controllers/printController');
 
@@ -231,6 +231,44 @@ describe('Receipt ESC/POS uses location header', () => {
     const buffer = buildReceiptEscpos(sale, { companyName: 'Shop', companyAddress: '' });
     const kick = drawerKick(0);
     expect(buffer.indexOf(kick)).toBe(-1);
+  });
+
+  it('wraps long receipt terms instead of truncating', () => {
+    const longLine =
+      'All products are sold subject to availability and inspection.';
+    const wrapped = expandReceiptTextLines(`TERMS & CONDITIONS\n• ${longLine}`, 48);
+    expect(wrapped.length).toBeGreaterThan(2);
+    expect(wrapped.join(' ')).toContain('availability and inspection');
+    wrapped.forEach((ln) => expect(ln.length).toBeLessThanOrEqual(48));
+
+    const sale = {
+      reference: 'INV-001',
+      type: 'retail',
+      paymentMethod: 'cash',
+      items: [{ name: 'Item', price: 0.01, quantity: 1 }],
+      total: 0.01,
+      subtotal: 0.01,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const terms = [
+      'TERMS & CONDITIONS',
+      '• Thank you for your purchase.',
+      '• All products are sold subject to availability and inspection.',
+      '• All products come with a 28-Day Repair or Replacement Warranty only.',
+      'Thank you for shopping with us.'
+    ].join('\n');
+    const buffer = buildReceiptEscpos(sale, {
+      companyName: 'Shop',
+      companyAddress: '',
+      receiptTerms: terms,
+      salesPrint: { paperWidthMm: 80, showTermsText: true, sectionOrder: ['items', 'total', 'terms', 'thank_you'] }
+    });
+    const str = buffer.toString('utf8');
+    expect(str.replace(/\s+/g, ' ')).toContain('availability and inspection');
+    expect(str.replace(/\s+/g, ' ')).toContain('Replacement Warranty only');
+    expect(str).not.toMatch(/availab[^i\n]/);
   });
 });
 

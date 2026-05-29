@@ -17,9 +17,11 @@ function cmd(...bytes) {
 function escposSafeText(str) {
     return String(str || '')
         .replace(/^\uFEFF+/, '')
+        .replace(/\u2022/g, '- ')
         .replace(/\u2014/g, '-')
         .replace(/\u2013/g, '-')
         .replace(/\u00b7/g, ' - ')
+        .replace(/\u00a0/g, ' ')
         .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '')
         .trim();
 }
@@ -97,14 +99,79 @@ function doubleHeightOff() {
     return cmd(ESC, 0x21, 0);
 }
 
+/** Word-wrap one line to fit thermal column width (Font A). */
+function wrapTextLine(text, maxChars) {
+    const cols = Math.max(8, maxChars);
+    const t = escposSafeText(text);
+    if (!t) return [];
+    if (t.length <= cols) return [t];
+
+    const words = t.split(/\s+/).filter(Boolean);
+    const out = [];
+    let current = '';
+
+    for (const word of words) {
+        if (word.length > cols) {
+            if (current) {
+                out.push(current);
+                current = '';
+            }
+            for (let i = 0; i < word.length; i += cols) {
+                out.push(word.slice(i, i + cols));
+            }
+            continue;
+        }
+        const next = current ? `${current} ${word}` : word;
+        if (next.length <= cols) {
+            current = next;
+        } else {
+            out.push(current);
+            current = word;
+        }
+    }
+    if (current) out.push(current);
+    return out;
+}
+
+/** Split receipt terms/body on newlines and wrap each paragraph for 80mm paper. */
+function expandReceiptTextLines(text, maxChars, maxLines = 80) {
+    const normalized = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const out = [];
+    for (const para of normalized.split('\n')) {
+        const trimmed = para.trim();
+        if (!trimmed) {
+            if (out.length && out[out.length - 1] !== '') out.push('');
+            continue;
+        }
+        for (const ln of wrapTextLine(trimmed, maxChars)) {
+            out.push(ln);
+            if (out.length >= maxLines) return out;
+        }
+    }
+    return out;
+}
+
 function pushCenteredLines(parts, lines, maxChars) {
     const rows = (lines || []).map((l) => String(l || '').trim()).filter(Boolean);
     if (!rows.length) return;
     parts.push(alignCenter());
     for (const row of rows) {
-        parts.push(line(row.slice(0, maxChars)));
+        for (const wrapped of wrapTextLine(row, maxChars)) {
+            parts.push(line(wrapped));
+        }
     }
     parts.push(alignLeft());
+}
+
+function pushLeftWrappedLines(parts, lines) {
+    parts.push(alignLeft());
+    for (const row of lines || []) {
+        if (!row) {
+            parts.push(line());
+            continue;
+        }
+        parts.push(line(row));
+    }
 }
 
 /** ASCII-safe amounts (UTF-8 £ often prints as ú on thermal drivers). */
@@ -437,7 +504,10 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
             }
             case 'terms': {
                 if (o.showTermsText === false || !receiptTerms) break;
-                pushCenteredLines(parts, receiptTerms.split('\n').slice(0, 8), cols);
+                const termLines = expandReceiptTextLines(receiptTerms, cols);
+                if (!termLines.length) break;
+                parts.push(line());
+                pushLeftWrappedLines(parts, termLines);
                 parts.push(line());
                 break;
             }
@@ -464,5 +534,7 @@ module.exports = {
     saleHasCashPayment,
     drawerKick,
     lineCharsForPaper,
-    dividerLine
+    dividerLine,
+    wrapTextLine,
+    expandReceiptTextLines
 };
