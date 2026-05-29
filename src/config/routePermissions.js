@@ -34,7 +34,12 @@ module.exports = {
     // Categories, locations, variant attributes, etc. (product/settings context)
     categories: { get: ['product.view'], post: ['product.create'], put: ['product.edit'], delete: ['product.delete'] },
     locations: { get: ['settings.view'], post: ['settings.edit'], put: ['settings.edit'], delete: ['settings.edit'] },
-    variantAttributes: { get: ['product.view'], post: ['product.create'], put: ['product.edit'], delete: ['product.delete'] },
+    variantAttributes: {
+        get: ['product.view'],
+        post: ['variant_attribute.create'],
+        put: ['variant_attribute.create'],
+        delete: ['variant_attribute.create']
+    },
     tax: { get: ['settings.view'], post: ['settings.edit'], put: ['settings.edit'], delete: ['user.manage'] },
     upload: { post: ['product.create', 'settings.edit'] },
     giftCards: { get: ['sale.view'], delete: ['sale.void'] },

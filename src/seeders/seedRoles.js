@@ -39,7 +39,9 @@ async function seedRolesOnConnection(conn, opts = {}) {
     const allKeys = (await Permission.find().select('key').lean()).map((p) => p.key);
     const adminPermIds = await getPermissionIdsByKeys(Permission, allKeys);
 
-    const managerKeys = allKeys.filter((k) => k !== 'user.manage' && k !== 'role.manage');
+    const managerKeys = allKeys.filter(
+        (k) => k !== 'user.manage' && k !== 'role.manage' && k !== 'variant_attribute.create'
+    );
     const managerPermIds = await getPermissionIdsByKeys(Permission, managerKeys);
 
     const staffKeys = [

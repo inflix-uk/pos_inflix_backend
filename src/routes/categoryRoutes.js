@@ -35,12 +35,36 @@ router.route('/')
 router.get('/slug/:slug', requirePermission('product.view'), getCategoryBySlug);
 
 router.get('/:id/variant-attributes', requirePermission('product.view'), getCategoryVariantAttributes);
-router.post('/:id/variant-attributes/:attributeId/values', requirePermission('product.edit'), addCategoryVariantValue);
-router.post('/:id/variant-attributes/:attributeId/values/add-at-path', requirePermission('product.edit'), addCategoryVariantValueAtPath);
-router.put('/:id/variant-attributes/:attributeId/values/update-at-path', requirePermission('product.edit'), updateCategoryVariantValueAtPath);
-router.delete('/:id/variant-attributes/:attributeId/values/delete-at-path', requirePermission('product.edit'), deleteCategoryVariantValueAtPath);
-router.post('/:id/variant-attributes/:attributeId/values/:valueId/models', requirePermission('product.edit'), addCategoryVariantValueModel);
-router.post('/:id/variant-attributes/:attributeId/values/:valueId/models/:modelId/children', requirePermission('product.edit'), addCategoryVariantValueModelChild);
+router.post(
+    '/:id/variant-attributes/:attributeId/values',
+    requirePermission('variant_attribute.create'),
+    addCategoryVariantValue
+);
+router.post(
+    '/:id/variant-attributes/:attributeId/values/add-at-path',
+    requirePermission('variant_attribute.create'),
+    addCategoryVariantValueAtPath
+);
+router.put(
+    '/:id/variant-attributes/:attributeId/values/update-at-path',
+    requirePermission('variant_attribute.create'),
+    updateCategoryVariantValueAtPath
+);
+router.delete(
+    '/:id/variant-attributes/:attributeId/values/delete-at-path',
+    requirePermission('variant_attribute.create'),
+    deleteCategoryVariantValueAtPath
+);
+router.post(
+    '/:id/variant-attributes/:attributeId/values/:valueId/models',
+    requirePermission('variant_attribute.create'),
+    addCategoryVariantValueModel
+);
+router.post(
+    '/:id/variant-attributes/:attributeId/values/:valueId/models/:modelId/children',
+    requirePermission('variant_attribute.create'),
+    addCategoryVariantValueModelChild
+);
 
 router.route('/:id')
     .get(requirePermission('product.view'), getCategory)

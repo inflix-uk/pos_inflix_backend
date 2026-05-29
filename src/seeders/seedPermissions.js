@@ -31,6 +31,11 @@ const PERMISSIONS = [
     { key: 'product.create', description: 'Create products', group: 'Products' },
     { key: 'product.edit', description: 'Edit products', group: 'Products' },
     { key: 'product.delete', description: 'Delete products', group: 'Products' },
+    {
+        key: 'variant_attribute.create',
+        description: 'Create variant values (brand, model, colour, etc.) and manage variant attribute catalog',
+        group: 'Products'
+    },
     { key: 'stock.view', description: 'View stock', group: 'Inventory' },
     { key: 'inventory.settings.manage', description: 'Manage inventory settings (e.g. default low stock threshold)', group: 'Inventory' },
     { key: 'stock.adjust', description: 'Adjust stock', group: 'Inventory' },

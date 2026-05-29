@@ -28,6 +28,11 @@ const PERMISSIONS = [
     { key: 'product.create', description: 'Create products', group: 'Products' },
     { key: 'product.edit', description: 'Edit products', group: 'Products' },
     { key: 'product.delete', description: 'Delete products', group: 'Products' },
+    {
+        key: 'variant_attribute.create',
+        description: 'Create variant values (brand, model, colour, etc.) and manage variant attribute catalog',
+        group: 'Products'
+    },
     { key: 'stock.view', description: 'View stock', group: 'Inventory' },
     { key: 'inventory.settings.manage', description: 'Manage inventory settings (e.g. default low stock threshold)', group: 'Inventory' },
     { key: 'stock.adjust', description: 'Adjust stock', group: 'Inventory' },
@@ -142,13 +147,28 @@ async function ensureSalesModePermissionOnRoles() {
     }
 }
 
+/** variant_attribute.create is admin-only by default (catalog + inline + Add on forms). */
+async function ensureVariantAttributeCreateOnAdminOnly() {
+    const perm = await Permission.findOne({ key: 'variant_attribute.create' }).select('_id').lean();
+    if (!perm) return;
+    const adminRole = await Role.findOne({ name: 'Admin' }).select('_id').lean();
+    if (adminRole) {
+        await Role.updateOne({ _id: adminRole._id }, { $addToSet: { permissions: perm._id } });
+    }
+    await Role.updateMany({ name: { $ne: 'Admin' } }, { $pull: { permissions: perm._id } });
+    const { invalidateAllPermissionCaches } = require('./rbacService');
+    invalidateAllPermissionCaches();
+}
+
 async function ensureRoles() {
     const count = await Role.countDocuments();
     if (count > 0) return;
 
     const allKeys = PERMISSIONS.map((p) => p.key);
     const adminPermIds = await getPermissionIdsByKeys(allKeys);
-    const managerKeys = allKeys.filter((k) => k !== 'user.manage' && k !== 'role.manage');
+    const managerKeys = allKeys.filter(
+        (k) => k !== 'user.manage' && k !== 'role.manage' && k !== 'variant_attribute.create'
+    );
     const managerPermIds = await getPermissionIdsByKeys(managerKeys);
     const staffKeys = [
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
@@ -229,6 +249,7 @@ function ensure() {
         await ensureRoles();
         await ensurePrintingPermissionOnRoles();
         await ensureSalesModePermissionOnRoles();
+        await ensureVariantAttributeCreateOnAdminOnly();
         return { permissionsInserted: inserted };
     })().catch((err) => {
         ensureByTenant.delete(tenantKey);
@@ -244,5 +265,6 @@ module.exports = {
     ensureRoles,
     ensurePrintingPermissionOnRoles,
     ensureSalesModePermissionOnRoles,
+    ensureVariantAttributeCreateOnAdminOnly,
     PERMISSIONS
 };

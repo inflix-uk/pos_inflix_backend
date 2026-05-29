@@ -17,6 +17,8 @@ const {
     replaceAndRemoveVariantValue
 } = require('../controllers/variantAttributeController');
 
+const canManageCatalog = requirePermission('variant_attribute.create');
+
 // All routes require authentication
 router.use(protect);
 
@@ -29,17 +31,17 @@ router.get('/active', requirePermission('product.view'), getActiveVariantAttribu
 router.get('/slug/:slug', requirePermission('product.view'), getVariantAttributeBySlug);
 router.get('/check-value-usage', requirePermission('product.view'), checkVariantValueUsage);
 
-router.post('/:id/values', requirePermission('product.edit'), addVariantAttributeValue);
-router.post('/:id/values/replace-and-remove', requirePermission('product.edit'), replaceAndRemoveVariantValue);
-router.post('/:id/values/:valueId/models', requirePermission('product.edit'), addVariantAttributeValueModel);
+router.post('/:id/values', canManageCatalog, addVariantAttributeValue);
+router.post('/:id/values/replace-and-remove', canManageCatalog, replaceAndRemoveVariantValue);
+router.post('/:id/values/:valueId/models', canManageCatalog, addVariantAttributeValueModel);
 
 router.route('/')
     .get(requirePermission('product.view'), getVariantAttributes)
-    .post(requirePermission('product.create'), variantValidation, validate, createVariantAttribute);
+    .post(canManageCatalog, variantValidation, validate, createVariantAttribute);
 
 router.route('/:id')
     .get(requirePermission('product.view'), getVariantAttribute)
-    .put(requirePermission('product.edit'), updateVariantAttribute)
-    .delete(requirePermission('product.delete'), deleteVariantAttribute);
+    .put(canManageCatalog, updateVariantAttribute)
+    .delete(canManageCatalog, deleteVariantAttribute);
 
 module.exports = router;

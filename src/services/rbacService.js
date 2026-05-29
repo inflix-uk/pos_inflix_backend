@@ -12,7 +12,7 @@ const ALL_PERMISSION_KEYS = [
     'dashboard.view',
     'sale.view', 'sale.create', 'sale.edit', 'sale.void', 'sale.delete',
     'return.create', 'refund.issue', 'storecredit.grant',
-    'product.view', 'product.create', 'product.edit', 'product.delete',
+    'product.view', 'product.create', 'product.edit', 'product.delete', 'variant_attribute.create',
     'stock.view', 'inventory.settings.manage', 'stock.adjust', 'stock.receive',
     'parcel.create', 'parcel.status_change',
     'report.view', 'report.export',
