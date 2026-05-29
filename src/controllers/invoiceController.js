@@ -2,6 +2,10 @@ const Invoice = require('../models/Invoice');
 const Tax = require('../models/Tax');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
+const {
+    normalizePaymentBreakdown,
+    computeRemainingAmountDue,
+} = require('../utils/wholesalePaymentAmounts');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -75,6 +79,14 @@ const createInvoice = asyncHandler(async (req, res) => {
     const taxAmount = body.tax != null ? Number(body.tax) : computeTaxAmount(subtotal, taxSnapshot);
     const discount = Number(body.discount) || 0;
     const total = body.total != null ? Number(body.total) : round2(subtotal + taxAmount - discount);
+    const previousBalance = Number(body.previousBalance) || 0;
+    const payments = normalizePaymentBreakdown(body.payments);
+    const amountDue = computeRemainingAmountDue({
+        total,
+        discount,
+        previousBalance,
+        payments,
+    });
 
     const invoice = await Invoice.create({
         type: body.type || 'wholesale',
@@ -86,11 +98,11 @@ const createInvoice = asyncHandler(async (req, res) => {
         discount,
         discountType: body.discountType || 'flat',
         discountValue: Number(body.discountValue) || 0,
-        previousBalance: Number(body.previousBalance) || 0,
-        amountDue: Number(body.amountDue) || 0,
+        previousBalance,
+        amountDue,
         customerId: body.customerId || null,
         customerName: body.customerName || '',
-        payments: body.payments || {},
+        payments,
         bankAccount: body.bankAccount || '',
         paymentMethod: body.paymentMethod,
         soldBy: req.user ? req.user._id : null,
@@ -130,6 +142,16 @@ const updateInvoice = asyncHandler(async (req, res) => {
             invoice.tax = computeTaxAmount(invoice.subtotal, snap);
         }
     }
+
+    if (body.payments !== undefined) {
+        invoice.payments = normalizePaymentBreakdown(body.payments);
+    }
+    invoice.amountDue = computeRemainingAmountDue({
+        total: invoice.total,
+        discount: invoice.discount,
+        previousBalance: invoice.previousBalance,
+        payments: invoice.payments,
+    });
 
     await invoice.save();
     res.status(200).json({ success: true, data: invoice });

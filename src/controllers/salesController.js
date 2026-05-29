@@ -26,6 +26,11 @@ const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const {
+    normalizePaymentBreakdown,
+    computeRemainingAmountDue,
+    computeWholesaleTotalOwing,
+} = require('../utils/wholesalePaymentAmounts');
 
 const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials'];
 async function invalidateSalesCaches(tenantId) {
@@ -706,9 +711,6 @@ exports.updateSale = asyncHandler(async (req, res) => {
     if (sale.type === 'wholesale' && sale.payments) {
         prevPaymentTotal = round2((Number(sale.payments.cash) || 0) + (Number(sale.payments.card) || 0) + (Number(sale.payments.bank) || 0));
     }
-    if (sale.type === 'wholesale' && typeof body.amountDue === 'number') {
-        sale.amountDue = body.amountDue;
-    }
     if (sale.type === 'wholesale' && body.payments) {
         const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
         const retailModeActive = await getEffectiveRetailModeEnabled(req.user._id);
@@ -725,22 +727,39 @@ exports.updateSale = asyncHandler(async (req, res) => {
                 (Number(body.payments.card) || 0) +
                 (Number(body.payments.bank) || 0)
             );
-            const amountDue = round2(Number(body.amountDue ?? sale.amountDue ?? sale.total) || 0);
-            if (paidSum < amountDue - 0.01) {
-                const remaining = round2(amountDue - paidSum);
+            const checkoutTotal = computeWholesaleTotalOwing({
+                total: typeof body.total === 'number' ? body.total : sale.total,
+                discount: typeof body.discount === 'number' ? body.discount : sale.discount,
+                previousBalance:
+                    typeof body.previousBalance === 'number' ? body.previousBalance : sale.previousBalance,
+            });
+            if (paidSum < checkoutTotal - 0.01) {
+                const remaining = round2(checkoutTotal - paidSum);
                 return res.status(400).json({
                     success: false,
                     message: `Retail mode requires full payment. Remaining: £${remaining.toFixed(2)}`
                 });
             }
         }
-        sale.payments = {
-            cash: Number(body.payments.cash) || 0,
-            card: Number(body.payments.card) || 0,
-            credit: Number(body.payments.credit) || 0,
-            bank: Number(body.payments.bank) || 0,
-            split: Number(body.payments.split) || 0
-        };
+        sale.payments = normalizePaymentBreakdown(body.payments);
+        sale.amountDue = computeRemainingAmountDue({
+            total: sale.total,
+            discount: sale.discount,
+            previousBalance: sale.previousBalance,
+            payments: sale.payments,
+        });
+    } else if (
+        sale.type === 'wholesale' &&
+        (typeof body.total === 'number' ||
+            typeof body.discount === 'number' ||
+            typeof body.previousBalance === 'number')
+    ) {
+        sale.amountDue = computeRemainingAmountDue({
+            total: sale.total,
+            discount: sale.discount,
+            previousBalance: sale.previousBalance,
+            payments: sale.payments,
+        });
     }
 
     if (sale.type === 'wholesale' && body.customerId !== undefined) {
@@ -1321,16 +1340,15 @@ exports.createSale = asyncHandler(async (req, res) => {
         saleData.paymentMethod = body.paymentMethod || 'cash';
     } else {
         saleData.previousBalance = Number(body.previousBalance) || 0;
-        saleData.amountDue = Number(body.amountDue) || 0;
         saleData.customerId = body.customerId || null;
         saleData.customerName = body.customerName || null;
-        saleData.payments = {
-            cash: Number(body.payments?.cash) || 0,
-            card: Number(body.payments?.card) || 0,
-            credit: Number(body.payments?.credit) || 0,
-            bank: Number(body.payments?.bank) || 0,
-            split: Number(body.payments?.split) || 0
-        };
+        saleData.payments = normalizePaymentBreakdown(body.payments);
+        saleData.amountDue = computeRemainingAmountDue({
+            total: saleData.total,
+            discount: saleData.discount,
+            previousBalance: saleData.previousBalance,
+            payments: saleData.payments,
+        });
         saleData.bankAccount = body.bankAccount || undefined;
     }
 
@@ -1351,9 +1369,13 @@ exports.createSale = asyncHandler(async (req, res) => {
             (Number(saleData.payments?.card) || 0) +
             (Number(saleData.payments?.bank) || 0)
         );
-        const amountDue = round2(Number(saleData.amountDue) || Number(saleData.total) || 0);
-        if (paidSum < amountDue - 0.01) {
-            const remaining = round2(amountDue - paidSum);
+        const checkoutTotal = computeWholesaleTotalOwing({
+            total: saleData.total,
+            discount: saleData.discount,
+            previousBalance: saleData.previousBalance,
+        });
+        if (paidSum < checkoutTotal - 0.01) {
+            const remaining = round2(checkoutTotal - paidSum);
             return res.status(400).json({
                 success: false,
                 message: `Retail mode requires full payment. Remaining: £${remaining.toFixed(2)}`
