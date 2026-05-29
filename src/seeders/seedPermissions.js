@@ -39,7 +39,7 @@ const PERMISSIONS = [
     { key: 'parcel.status_change', description: 'Change parcel status', group: 'Parcels' },
     { key: 'report.view', description: 'View reports', group: 'Reports' },
     { key: 'report.export', description: 'Export reports', group: 'Reports' },
-    { key: 'report.zread', description: 'View Daily Closing Till Reading (Z-Read) dashboard', group: 'Reports' },
+    { key: 'report.zread', description: 'View Z-Report (till closing)', group: 'Reports' },
     { key: 'user.manage', description: 'Manage users', group: 'Admin' },
     { key: 'role.manage', description: 'Manage roles', group: 'Admin' },
     { key: 'audit.view', description: 'View activity log', group: 'Admin' },

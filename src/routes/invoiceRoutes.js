@@ -9,6 +9,7 @@ const {
     voidInvoice,
     deleteInvoice,
     checkReference,
+    getNextReference,
 } = require('../controllers/invoiceController');
 
 router.use(protect);
@@ -18,6 +19,7 @@ router.route('/')
     .post(requirePermission('invoice.create'), createInvoice);
 
 router.get('/check-reference', requirePermission('invoice.create'), checkReference);
+router.get('/next-reference', requirePermission('invoice.create'), getNextReference);
 
 router.delete('/:id/hard', requirePermission('invoice.delete'), deleteInvoice);
 

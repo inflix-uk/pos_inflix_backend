@@ -157,16 +157,70 @@ const deleteInvoice = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, data: { _id: invoice._id } });
 });
 
+const INVC_REF_REGEX = /^INVC-(\d{6})$/;
+
+/** Next free INVC-###### (starts after `afterRef` when provided, else after highest in DB). */
+async function computeNextInvoiceReference(afterRef) {
+    let seq = 1;
+    const after = String(afterRef || '').trim().toUpperCase();
+    const afterMatch = after.match(INVC_REF_REGEX);
+    if (afterMatch) {
+        seq = parseInt(afterMatch[1], 10) + 1;
+    } else {
+        const last = await Invoice.findOne({ reference: /^INVC-\d{6}$/ })
+            .sort({ reference: -1 })
+            .select('reference')
+            .lean();
+        if (last?.reference) {
+            const m = last.reference.match(INVC_REF_REGEX);
+            if (m) seq = parseInt(m[1], 10) + 1;
+        }
+    }
+    for (let attempt = 0; attempt < 10000; attempt += 1) {
+        const candidate = `INVC-${String(seq).padStart(6, '0')}`;
+        const taken = await Invoice.exists({ reference: candidate });
+        if (!taken) return candidate;
+        seq += 1;
+    }
+    throw new Error('Could not allocate invoice reference');
+}
+
 const checkReference = asyncHandler(async (req, res) => {
     const ref = String(req.query.reference || '').trim().toUpperCase();
+    const excludeId = req.query.excludeId ? String(req.query.excludeId).trim() : '';
     if (!ref) {
         return res.status(200).json({ success: true, data: { valid: false, exists: false } });
     }
     if (!/^[A-Z0-9\-\/_]{1,32}$/.test(ref)) {
         return res.status(200).json({ success: true, data: { valid: false, exists: false } });
     }
-    const exists = await Invoice.exists({ reference: ref });
-    res.status(200).json({ success: true, data: { valid: true, exists: !!exists } });
+    const existing = await Invoice.findOne({ reference: ref }).select('_id').lean();
+    const exists = Boolean(
+        existing && (!excludeId || String(existing._id) !== excludeId)
+    );
+    let nextAvailable;
+    if (exists) {
+        try {
+            nextAvailable = await computeNextInvoiceReference(ref);
+        } catch {
+            nextAvailable = undefined;
+        }
+    }
+    res.status(200).json({
+        success: true,
+        data: {
+            reference: ref,
+            valid: true,
+            exists,
+            ...(nextAvailable ? { nextAvailable } : {}),
+        },
+    });
+});
+
+const getNextReference = asyncHandler(async (req, res) => {
+    const after = String(req.query.after || '').trim().toUpperCase();
+    const nextAvailable = await computeNextInvoiceReference(after || undefined);
+    res.status(200).json({ success: true, data: { reference: nextAvailable } });
 });
 
 module.exports = {
@@ -177,4 +231,5 @@ module.exports = {
     voidInvoice,
     deleteInvoice,
     checkReference,
+    getNextReference,
 };

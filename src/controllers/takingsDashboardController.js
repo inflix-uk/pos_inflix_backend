@@ -96,26 +96,84 @@ const returnLondonDateKey = {
   }
 };
 
+/** Match sale/return activity between UTC instants (shift Z-Read). */
+function occurredBetweenUtc(fromUtc, toUtc) {
+  return {
+    $expr: {
+      $and: [
+        { $gte: [{ $ifNull: ['$occurredAt', '$createdAt'] }, fromUtc] },
+        { $lte: [{ $ifNull: ['$occurredAt', '$createdAt'] }, toUtc] },
+      ],
+    },
+  };
+}
+
+function voidedBetweenUtc(fromUtc, toUtc) {
+  return {
+    $expr: {
+      $and: [
+        { $gte: [{ $ifNull: ['$voidedAtUtc', '$createdAt'] }, fromUtc] },
+        { $lte: [{ $ifNull: ['$voidedAtUtc', '$createdAt'] }, toUtc] },
+      ],
+    },
+  };
+}
+
+function returnOccurredBetweenUtc(fromUtc, toUtc) {
+  return {
+    $expr: {
+      $and: [
+        { $gte: [{ $ifNull: ['$occurredAt', { $ifNull: ['$date', '$createdAt'] }] }, fromUtc] },
+        { $lte: [{ $ifNull: ['$occurredAt', { $ifNull: ['$date', '$createdAt'] }] }, toUtc] },
+      ],
+    },
+  };
+}
+
 /**
  * GET /api/reports/takings-dashboard
  * Query: from, to (YYYY-MM-DD; default today London), locationId (all | id)
+ * Optional: fromUtc, toUtc (ISO) — shift window; skips daily-metrics rollup and cache.
  */
 exports.getTakingsDashboard = asyncHandler(async (req, res) => {
   const fromParam = (req.query.from || '').trim();
   const toParam = (req.query.to || '').trim();
+  const fromUtcParam = (req.query.fromUtc || '').trim();
+  const toUtcParam = (req.query.toUtc || '').trim();
   const locationIdParam = (req.query.locationId || 'all').trim().toLowerCase();
   const tid = getTenantIdFromReq(req);
   const userScope = getUserLocationScope(req.user);
 
   const todayLondon = getLondonDateKey(new Date());
-  const from = fromParam || todayLondon;
-  const to = toParam || todayLondon;
+  let from = fromParam || todayLondon;
+  let to = toParam || todayLondon;
+
+  let useUtcRange = false;
+  let fromUtc = null;
+  let toUtc = null;
+  if (fromUtcParam && toUtcParam) {
+    fromUtc = new Date(fromUtcParam);
+    toUtc = new Date(toUtcParam);
+    if (Number.isNaN(fromUtc.getTime()) || Number.isNaN(toUtc.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid fromUtc or toUtc' });
+    }
+    if (toUtc < fromUtc) {
+      return res.status(400).json({ success: false, message: 'toUtc must be after fromUtc' });
+    }
+    useUtcRange = true;
+    from = getLondonDateKey(fromUtc);
+    to = getLondonDateKey(toUtc);
+  }
 
   const scopeKey = (userScope && userScope.length) ? userScope.sort().join(',') : 'all';
-  const cacheKeySuffix = `takingsdash:v3:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}`;
-  const cached = await redis.getDashboardCache(cacheKeySuffix);
-  if (cached) {
-    return res.json({ success: true, data: cached, cached: true });
+  const cacheKeySuffix = useUtcRange
+    ? `takingsdash:shift:v1:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}`
+    : `takingsdash:v3:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}`;
+  if (!useUtcRange) {
+    const cached = await redis.getDashboardCache(cacheKeySuffix);
+    if (cached) {
+      return res.json({ success: true, data: cached, cached: true });
+    }
   }
 
   const locationMatch = { tenantId: tid };
@@ -128,19 +186,29 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     locationMatch.locationId = { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) };
   }
 
-  const saleMatch = { tenantId: tid, status: { $ne: 'voided' }, londonDateKey: { $gte: from, $lte: to } };
+  const saleMatch = { tenantId: tid, status: { $ne: 'voided' } };
+  if (!useUtcRange) saleMatch.londonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) saleMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) saleMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
+  if (useUtcRange) Object.assign(saleMatch, occurredBetweenUtc(fromUtc, toUtc));
 
-  const voidMatch = { tenantId: tid, status: 'voided', voidLondonDateKey: { $gte: from, $lte: to } };
+  const voidMatch = { tenantId: tid, status: 'voided' };
+  if (!useUtcRange) voidMatch.voidLondonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) voidMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) voidMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
+  if (useUtcRange) Object.assign(voidMatch, voidedBetweenUtc(fromUtc, toUtc));
 
-  const returnMatch = { tenantId: tid, returnLondonDateKey: { $gte: from, $lte: to } };
+  const returnMatch = { tenantId: tid };
+  if (!useUtcRange) returnMatch.returnLondonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) returnMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) returnMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
+  if (useUtcRange) Object.assign(returnMatch, returnOccurredBetweenUtc(fromUtc, toUtc));
 
-  const ledgerDateMatch = { tenantId: tid, ledgerLondonDateKey: { $gte: from, $lte: to } };
+  const ledgerDateMatch = { tenantId: tid };
+  if (!useUtcRange) ledgerDateMatch.ledgerLondonDateKey = { $gte: from, $lte: to };
+  else {
+    ledgerDateMatch.occurredAtUtc = { $gte: fromUtc, $lte: toUtc };
+  }
   if (locationIdParam !== 'all' && locationIdParam) ledgerDateMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) ledgerDateMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
 
@@ -158,6 +226,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     salePaymentInFromSales,
   ] = await Promise.all([
     (() => {
+      if (useUtcRange) return Promise.resolve([]);
       if (locationIdParam === 'all' || !locationIdParam) {
         if (userScope && userScope.length > 0) {
           return LocationDailyMetric.aggregate([
@@ -175,7 +244,16 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
         { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
       ]);
     })(),
-    PaymentLedgerEntry.aggregate([
+    PaymentLedgerEntry.aggregate(
+      useUtcRange
+        ? [{ $match: ledgerDateMatch }, {
+          $group: {
+            _id: '$method',
+            in: { $sum: { $cond: [{ $eq: ['$direction', 'in'] }, '$amount', 0] } },
+            out: { $sum: { $cond: [{ $eq: ['$direction', 'out'] }, '$amount', 0] } }
+          }
+        }]
+        : [
       { $addFields: { ledgerLondonDateKey: { $dateToString: { date: '$occurredAtUtc', format: '%Y-%m-%d', timezone: 'Europe/London' } } } },
       { $match: ledgerDateMatch },
       {
@@ -186,7 +264,19 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
         }
       }
     ]),
-    PaymentLedgerEntry.aggregate([
+    PaymentLedgerEntry.aggregate(
+      useUtcRange
+        ? [{ $match: ledgerDateMatch }, {
+          $group: {
+            _id: '$accountId',
+            in: { $sum: { $cond: [{ $eq: ['$direction', 'in'] }, '$amount', 0] } },
+            out: { $sum: { $cond: [{ $eq: ['$direction', 'out'] }, '$amount', 0] } }
+          }
+        },
+        { $lookup: { from: 'payment_accounts', localField: '_id', foreignField: '_id', as: 'account' } },
+        { $unwind: { path: '$account', preserveNullAndEmptyArrays: true } },
+        { $project: { accountId: '$_id', accountName: '$account.name', type: '$account.type', in: 1, out: 1, net: { $subtract: ['$in', '$out'] } } }]
+        : [
       { $addFields: { ledgerLondonDateKey: { $dateToString: { date: '$occurredAtUtc', format: '%Y-%m-%d', timezone: 'Europe/London' } } } },
       { $match: ledgerDateMatch },
       {
@@ -200,48 +290,77 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
       { $unwind: { path: '$account', preserveNullAndEmptyArrays: true } },
       { $project: { accountId: '$_id', accountName: '$account.name', type: '$account.type', in: 1, out: 1, net: { $subtract: ['$in', '$out'] } } }
     ]),
-    Sale.aggregate([
+    Sale.aggregate(
+      useUtcRange
+        ? [{ $match: voidMatch }, { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$total' } } }]
+        : [
       { $addFields: { voidLondonDateKey: { $dateToString: { date: { $ifNull: ['$voidedAtUtc', '$createdAt'] }, format: '%Y-%m-%d', timezone: 'Europe/London' } } } },
       { $match: voidMatch },
       { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$total' } } }
     ]),
-    Sale.aggregate([
+    Sale.aggregate(
+      useUtcRange
+        ? [{ $match: saleMatch }, { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }]
+        : [
       { $addFields: { londonDateKey: saleLondonDateKey } },
       { $match: saleMatch },
       { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } },
     ]),
-    Sale.aggregate([
+    Sale.aggregate(
+      useUtcRange
+        ? [{ $match: saleMatch }, { $unwind: '$items' }, { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_sale', 0] }] } } } }]
+        : [
       { $addFields: { londonDateKey: saleLondonDateKey } },
       { $match: saleMatch },
       { $unwind: '$items' },
       { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_sale', 0] }] } } } },
     ]),
-    SalesReturn.aggregate([
+    SalesReturn.aggregate(
+      useUtcRange
+        ? [{ $match: returnMatch }, { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } }]
+        : [
       { $addFields: { returnLondonDateKey: returnLondonDateKey } },
       { $match: returnMatch },
       { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } },
     ]),
-    SalesReturn.aggregate([
+    SalesReturn.aggregate(
+      useUtcRange
+        ? [{ $match: returnMatch }, { $unwind: '$items' }, { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_return', 0] }] } } } }]
+        : [
       { $addFields: { returnLondonDateKey: returnLondonDateKey } },
       { $match: returnMatch },
       { $unwind: '$items' },
       { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_return', 0] }] } } } },
     ]),
     Expense.aggregate([
-      { $match: { tenantId: tid, status: { $in: ['Approved', 'Paid'] }, occurredAtUtc: { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') } } },
+      { $match: {
+        tenantId: tid,
+        status: { $in: ['Approved', 'Paid'] },
+        occurredAtUtc: useUtcRange
+          ? { $gte: fromUtc, $lte: toUtc }
+          : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') },
+      } },
       { $group: { _id: null, total: { $sum: '$amountGross' } } }
     ]),
     Expense.aggregate([
-      { $match: { tenantId: tid, status: { $in: ['Approved', 'Paid'] }, occurredAtUtc: { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') } } },
+      { $match: {
+        tenantId: tid,
+        status: { $in: ['Approved', 'Paid'] },
+        occurredAtUtc: useUtcRange
+          ? { $gte: fromUtc, $lte: toUtc }
+          : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') },
+      } },
       { $group: { _id: '$categoryId', totalGross: { $sum: '$amountGross' }, count: { $sum: 1 } } },
       { $lookup: { from: 'expense_categories', localField: '_id', foreignField: '_id', as: 'cat' } },
       { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
       { $project: { categoryName: '$cat.name', totalGross: 1, count: 1, _id: 1 } },
       { $sort: { totalGross: -1 } },
     ]),
-    Sale.aggregate([
-      { $addFields: { londonDateKey: saleLondonDateKey } },
-      { $match: saleMatch },
+    Sale.aggregate(
+      (useUtcRange
+        ? [{ $match: saleMatch }]
+        : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
+      ).concat([
       {
         $project: {
           isWholesale: { $eq: ['$type', 'wholesale'] },
@@ -294,7 +413,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
           creditIn: { $sum: '$creditIn' },
         },
       },
-    ]),
+    ])),
   ]);
 
   // Daily metrics rollup: when the aggregate returns no row (e.g. not backfilled), we must use
@@ -414,7 +533,12 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
   }
 
   const data = {
-    range: { from, to, timezone: 'Europe/London' },
+    range: {
+      from,
+      to,
+      timezone: 'Europe/London',
+      ...(useUtcRange ? { fromUtc: fromUtc.toISOString(), toUtc: toUtc.toISOString() } : {}),
+    },
     location,
     takings: {
       salesCount,
@@ -436,6 +560,8 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     }
   };
 
-  await redis.setDashboardCache(cacheKeySuffix, data);
+  if (!useUtcRange) {
+    await redis.setDashboardCache(cacheKeySuffix, data);
+  }
   res.status(200).json({ success: true, data });
 });

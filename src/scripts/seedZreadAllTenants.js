@@ -7,7 +7,7 @@ const mongoose = require('mongoose');
 
 const PERM = {
     key: 'report.zread',
-    description: 'View Daily Closing Till Reading (Z-Read) dashboard',
+    description: 'View Z-Report (till closing)',
     group: 'Reports',
 };
 
