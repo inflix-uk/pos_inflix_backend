@@ -451,7 +451,7 @@ exports.getSales = asyncHandler(async (req, res) => {
             ];
             const custIds = await Customer.find({
                 tenantId,
-                $or: [{ email: rx }, { phone: rx }, { mobile: rx }]
+                $or: [{ name: rx }, { contactName: rx }, { email: rx }, { phone: rx }, { mobile: rx }]
             })
                 .select('_id')
                 .lean();
@@ -1560,57 +1560,64 @@ exports.createSale = asyncHandler(async (req, res) => {
     stockItemService.invalidateTypeaheadCache && stockItemService.invalidateTypeaheadCache(tenantId);
     require('./purchaseController').invalidateTypeaheadCache?.(tenantId);
 
-    // [Inventory snapshot] Print non-serial inventory state after this sale (per line):
-    //   purchased (original), sold (lifetime across active sales), remaining (current Purchase.items.quantity).
+    // [Inventory snapshot] Print inventory state for every line on this invoice:
+    //   product, qty sold this sale, serials (if any), and remaining stock left.
     try {
-        const nonSerialLines = (saleData.items || []).filter(
-            (i) => i.purchaseId && i.purchaseItemId && !(Array.isArray(i.serialNumbers) && i.serialNumbers.length > 0)
-        );
-        if (nonSerialLines.length > 0) {
+        const allLines = (saleData.items || []);
+        if (allLines.length > 0) {
             const mongoose = require('mongoose');
-            const lineKeys = nonSerialLines.map((i) => ({
-                purchaseId: String(i.purchaseId),
-                itemId: String(i.purchaseItemId),
-                sku: i.sku,
-                name: i.name,
-                soldThisSale: Number(i.quantity) || 0
-            }));
-            const purchaseIds = [...new Set(lineKeys.map((k) => k.purchaseId))]
+            const linesWithPurchase = allLines.filter((i) => i.purchaseId && i.purchaseItemId);
+            const purchaseIds = [...new Set(linesWithPurchase.map((i) => String(i.purchaseId)))]
                 .map((id) => new mongoose.Types.ObjectId(id));
-            const purchases = await Purchase.find({ _id: { $in: purchaseIds } })
-                .select('items._id items.quantity items.name')
-                .lean();
+            const purchases = purchaseIds.length > 0
+                ? await Purchase.find({ _id: { $in: purchaseIds } })
+                    .select('items._id items.quantity items.name')
+                    .lean()
+                : [];
             const remainingByKey = new Map();
             for (const p of purchases) {
                 for (const it of (p.items || [])) {
                     remainingByKey.set(`${p._id}\t${it._id}`, Number(it.quantity) || 0);
                 }
             }
-            const skus = [...new Set(lineKeys.map((k) => k.sku))];
-            const soldAgg = await Sale.aggregate([
-                { $match: { tenantId, status: { $ne: 'voided' }, 'items.sku': { $in: skus } } },
-                { $unwind: '$items' },
-                { $match: { 'items.sku': { $in: skus } } },
-                { $group: { _id: '$items.sku', sold: { $sum: '$items.quantity' } } }
-            ]);
+            const skus = [...new Set(allLines.map((i) => i.sku).filter(Boolean))];
+            const soldAgg = skus.length > 0
+                ? await Sale.aggregate([
+                    { $match: { tenantId, status: { $ne: 'voided' }, 'items.sku': { $in: skus } } },
+                    { $unwind: '$items' },
+                    { $match: { 'items.sku': { $in: skus } } },
+                    { $group: { _id: '$items.sku', sold: { $sum: '$items.quantity' } } }
+                ])
+                : [];
             const soldBySku = new Map(soldAgg.map((r) => [r._id, Number(r.sold) || 0]));
-            const snapshot = lineKeys.map((k) => {
-                const remaining = remainingByKey.get(`${k.purchaseId}\t${k.itemId}`) ?? null;
-                const totalSold = soldBySku.get(k.sku) || 0;
+            const snapshot = allLines.map((i) => {
+                const serials = Array.isArray(i.serialNumbers) ? i.serialNumbers.filter(Boolean) : [];
+                const isSerial = serials.length > 0;
+                const key = (i.purchaseId && i.purchaseItemId) ? `${i.purchaseId}\t${i.purchaseItemId}` : null;
+                const remaining = key && remainingByKey.has(key) ? remainingByKey.get(key) : null;
+                const totalSold = soldBySku.get(i.sku) || 0;
                 const purchased = (remaining != null) ? remaining + totalSold : null;
                 return {
-                    name: k.name,
-                    sku: k.sku,
+                    name: i.name,
+                    sku: i.sku,
+                    type: isSerial ? 'serial' : 'non-serial',
+                    soldThisSale: Number(i.quantity) || 0,
+                    serials: isSerial ? serials : undefined,
                     purchased,
                     soldTotal: totalSold,
-                    soldThisSale: k.soldThisSale,
                     remaining
                 };
             });
-            console.info('[Inventory after sale]', { reference: sale.reference, lines: snapshot });
+            console.info('[Invoice sold]', {
+                reference: sale.reference,
+                customer: sale.customerName || null,
+                totalItems: snapshot.length,
+                totalQty: snapshot.reduce((s, l) => s + l.soldThisSale, 0),
+                lines: snapshot
+            });
         }
     } catch (err) {
-        console.warn('[Inventory after sale] snapshot failed:', err.message);
+        console.warn('[Invoice sold] snapshot failed:', err.message);
     }
 
     await invalidateSalesCaches(tenantId);

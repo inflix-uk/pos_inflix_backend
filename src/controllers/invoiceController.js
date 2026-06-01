@@ -1,11 +1,23 @@
+const mongoose = require('mongoose');
 const Invoice = require('../models/Invoice');
+const Purchase = require('../models/Purchase');
 const Tax = require('../models/Tax');
+const SoldSerial = require('../models/SoldSerial');
+const SerialHistory = require('../models/SerialHistory');
+const GeneralSettings = require('../models/GeneralSettings');
+const Customer = require('../models/Customer');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const {
     normalizePaymentBreakdown,
     computeRemainingAmountDue,
 } = require('../utils/wholesalePaymentAmounts');
+const transactionService = require('../services/transactionService');
+const {
+    decrementProductQuantitiesWithSession,
+    decrementPurchaseItemQuantitiesWithSession,
+} = require('../services/salesTransactionService');
+const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -40,7 +52,20 @@ const getInvoices = asyncHandler(async (req, res) => {
     if (type && type !== 'all') query.type = type;
     if (search) {
         const re = new RegExp(escapeRegex(search), 'i');
-        query.$or = [{ reference: re }, { customerName: re }];
+        const orClause = [{ reference: re }, { customerName: re }];
+        // Match by Customer.contactName / contact fields — Invoice stores only the customerName snapshot,
+        // so look up matching customers (by tenant) and add their ids to the $or clause.
+        const matchingCustomers = await Customer.find({
+            tenantId,
+            $or: [{ contactName: re }, { email: re }, { phone: re }, { mobile: re }],
+        })
+            .select('_id')
+            .lean();
+        const matchedIds = (matchingCustomers || []).map((c) => c._id).filter(Boolean);
+        if (matchedIds.length > 0) {
+            orClause.push({ customerId: { $in: matchedIds } });
+        }
+        query.$or = orClause;
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -88,30 +113,144 @@ const createInvoice = asyncHandler(async (req, res) => {
         payments,
     });
 
-    const invoice = await Invoice.create({
-        type: body.type || 'wholesale',
-        items: Array.isArray(body.items) ? body.items : [],
-        subtotal,
-        ...taxSnapshot,
-        tax: taxAmount,
-        total,
-        discount,
-        discountType: body.discountType || 'flat',
-        discountValue: Number(body.discountValue) || 0,
-        previousBalance,
-        amountDue,
-        customerId: body.customerId || null,
-        customerName: body.customerName || '',
-        payments,
-        bankAccount: body.bankAccount || '',
-        paymentMethod: body.paymentMethod,
-        soldBy: req.user ? req.user._id : null,
-        occurredAt: body.occurredAt ? new Date(body.occurredAt) : null,
-        locationId: body.locationId || null,
-        tenantId,
-        note: body.note || '',
-        reference: body.reference || undefined,
-    });
+    const itemsIn = Array.isArray(body.items) ? body.items : [];
+
+    // Pre-flight: serial numbers must not already be sold.
+    const serialsToCheck = [...new Set(
+        itemsIn.flatMap((item) => (Array.isArray(item.serialNumbers) ? item.serialNumbers : [])
+            .map((s) => (s && String(s).trim()) || '')
+            .filter(Boolean))
+    )];
+    if (serialsToCheck.length > 0) {
+        const alreadySold = await findActiveSoldSerialsAmong(serialsToCheck);
+        if (alreadySold.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Serial number(s) already sold: ${alreadySold.map((s) => s.serialNumber).join(', ')}`,
+            });
+        }
+    }
+
+    const settings = await GeneralSettings.getSettings().catch(() => ({ allowNegativeStock: false }));
+    const allowNegativeStock = !!(settings && settings.allowNegativeStock);
+
+    let invoice;
+    try {
+        invoice = await transactionService.runWithTransaction(async (session) => {
+            const created = await Invoice.create([{
+                type: body.type || 'wholesale',
+                items: itemsIn,
+                subtotal,
+                ...taxSnapshot,
+                tax: taxAmount,
+                total,
+                discount,
+                discountType: body.discountType || 'flat',
+                discountValue: Number(body.discountValue) || 0,
+                previousBalance,
+                amountDue,
+                customerId: body.customerId || null,
+                customerName: body.customerName || '',
+                payments,
+                bankAccount: body.bankAccount || '',
+                paymentMethod: body.paymentMethod,
+                soldBy: req.user ? req.user._id : null,
+                occurredAt: body.occurredAt ? new Date(body.occurredAt) : null,
+                locationId: body.locationId || null,
+                tenantId,
+                note: body.note || '',
+                reference: body.reference || undefined,
+            }], session ? { session } : undefined);
+            const inv = Array.isArray(created) ? created[0] : created;
+
+            // SoldSerial + SerialHistory for every serial line.
+            const now = new Date();
+            const refLabel = inv.reference || `Invoice ${inv._id}`;
+            const soldSerialDocs = [];
+            for (const item of itemsIn) {
+                const serials = Array.isArray(item.serialNumbers) ? item.serialNumbers : [];
+                for (const s of serials) {
+                    const trimmed = (s && String(s).trim()) || null;
+                    if (trimmed) soldSerialDocs.push({ serialNumber: trimmed, saleId: inv._id, soldAt: now });
+                }
+            }
+            if (soldSerialDocs.length > 0) {
+                await SoldSerial.insertMany(soldSerialDocs, session ? { session } : undefined);
+                const customerName = inv.customerName ? String(inv.customerName).trim() : '';
+                const historyDocs = soldSerialDocs.map((d) => ({
+                    serialNumber: d.serialNumber,
+                    eventType: 'sold',
+                    referenceType: 'Invoice',
+                    referenceId: inv._id,
+                    referenceLabel: refLabel,
+                    customerName,
+                }));
+                await SerialHistory.insertMany(historyDocs, session ? { session } : undefined);
+            }
+
+            // Decrement Product.quantity (SKU-based) and Purchase.items.quantity (non-serial lines).
+            await decrementProductQuantitiesWithSession(itemsIn, session, { enforceNonNegative: !allowNegativeStock });
+            await decrementPurchaseItemQuantitiesWithSession(itemsIn, session, { enforceNonNegative: !allowNegativeStock });
+
+            return inv;
+        });
+    } catch (err) {
+        const msg = err && err.message ? err.message : 'Invoice creation failed';
+        if (msg.includes('already sold')) {
+            return res.status(400).json({ success: false, message: msg });
+        }
+        if (msg.startsWith('Insufficient stock')) {
+            return res.status(400).json({ success: false, message: msg });
+        }
+        throw err;
+    }
+
+    // [Invoice sold] Log every line on this invoice: product, qty sold, serials, and remaining stock.
+    try {
+        const lines = Array.isArray(invoice.items) ? invoice.items : [];
+        if (lines.length > 0) {
+            const linesWithPurchase = lines.filter((i) => i.purchaseId && i.purchaseItemId);
+            const purchaseIds = [...new Set(linesWithPurchase.map((i) => String(i.purchaseId)))]
+                .map((id) => new mongoose.Types.ObjectId(id));
+            const purchases = purchaseIds.length > 0
+                ? await Purchase.find({ _id: { $in: purchaseIds } })
+                    .select('items._id items.quantity items.imeis')
+                    .lean()
+                : [];
+            const remainingByKey = new Map();
+            for (const p of purchases) {
+                for (const it of (p.items || [])) {
+                    const qty = Number(it.quantity) || 0;
+                    const imeiCount = Array.isArray(it.imeis) ? it.imeis.length : 0;
+                    remainingByKey.set(`${p._id}\t${it._id}`, { qty, imeiCount });
+                }
+            }
+            const snapshot = lines.map((i) => {
+                const serials = Array.isArray(i.serialNumbers) ? i.serialNumbers.filter(Boolean) : [];
+                const isSerial = serials.length > 0;
+                const key = (i.purchaseId && i.purchaseItemId) ? `${i.purchaseId}\t${i.purchaseItemId}` : null;
+                const rem = key ? remainingByKey.get(key) : null;
+                return {
+                    name: i.name,
+                    sku: i.sku,
+                    type: isSerial ? 'serial' : 'non-serial',
+                    soldThisInvoice: Number(i.quantity) || 0,
+                    serials: isSerial ? serials : undefined,
+                    remainingQty: rem ? rem.qty : null,
+                    remainingSerials: rem ? rem.imeiCount : null,
+                };
+            });
+            console.info('[Invoice sold]', {
+                reference: invoice.reference,
+                customer: invoice.customerName || null,
+                totalItems: snapshot.length,
+                totalQty: snapshot.reduce((s, l) => s + l.soldThisInvoice, 0),
+                lines: snapshot,
+            });
+        }
+    } catch (err) {
+        console.warn('[Invoice sold] snapshot failed:', err.message);
+    }
 
     res.status(201).json({ success: true, data: invoice });
 });

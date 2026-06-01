@@ -68,13 +68,27 @@ exports.getSalesReturns = asyncHandler(async (req, res) => {
     // Admin or empty assignedLocationIds: no location filter (see all locations)
     if (req.query.search) {
         const search = req.query.search.trim();
-        query.$or = [
-            { reference: { $regex: search, $options: 'i' } },
-            { linkedInvoiceRef: { $regex: search, $options: 'i' } },
-            { customerName: { $regex: search, $options: 'i' } },
-            { 'items.product': { $regex: search, $options: 'i' } },
-            { 'items.serialNumbers': { $regex: search, $options: 'i' } },
+        const rx = { $regex: search, $options: 'i' };
+        const orClause = [
+            { reference: rx },
+            { linkedInvoiceRef: rx },
+            { customerName: rx },
+            { 'items.product': rx },
+            { 'items.serialNumbers': rx },
         ];
+        // Match by Customer.contactName (and other contact fields) — SalesReturn stores only the customerName
+        // snapshot, so look up matching customers and add their names to the $or clause.
+        const matchingCustomers = await Customer.find({
+            tenantId,
+            $or: [{ contactName: rx }, { email: rx }, { phone: rx }, { mobile: rx }],
+        })
+            .select('name')
+            .lean();
+        const matchedNames = (matchingCustomers || []).map((c) => c.name).filter(Boolean);
+        if (matchedNames.length > 0) {
+            orClause.push({ customerName: { $in: matchedNames } });
+        }
+        query.$or = orClause;
     }
     if (req.query.status && req.query.status !== 'All') query.status = req.query.status;
     if (req.query.paymentStatus && req.query.paymentStatus !== 'All') query.paymentStatus = req.query.paymentStatus;
