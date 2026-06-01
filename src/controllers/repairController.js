@@ -1,5 +1,6 @@
 const Repair = require('../models/Repair');
 const Sale = require('../models/Sale');
+const Customer = require('../models/Customer');
 const asyncHandler = require('../middleware/asyncHandler');
 const metricsService = require('../services/metricsService');
 const { getTenantIdFromReq } = require('../middleware/auth');
@@ -178,14 +179,28 @@ exports.getRepairs = asyncHandler(async (req, res) => {
 
             if (req.query.search) {
                 const search = req.query.search.trim();
-                query.$or = [
-                    { reference: { $regex: search, $options: 'i' } },
-                    { customerName: { $regex: search, $options: 'i' } },
-                    { contactPhone: { $regex: search, $options: 'i' } },
-                    { deviceDescription: { $regex: search, $options: 'i' } },
-                    { serialNumber: { $regex: search, $options: 'i' } },
-                    { notes: { $regex: search, $options: 'i' } }
+                const rx = { $regex: search, $options: 'i' };
+                const orClause = [
+                    { reference: rx },
+                    { customerName: rx },
+                    { contactPhone: rx },
+                    { deviceDescription: rx },
+                    { serialNumber: rx },
+                    { notes: rx }
                 ];
+                // Match by Customer.contactName / contact fields so search by the contact's name
+                // returns repairs even when the snapshot customerName is the company name.
+                const matchingCustomers = await Customer.find({
+                    tenantId,
+                    $or: [{ contactName: rx }, { email: rx }, { mobile: rx }],
+                })
+                    .select('_id')
+                    .lean();
+                const matchedIds = (matchingCustomers || []).map((c) => c._id).filter(Boolean);
+                if (matchedIds.length > 0) {
+                    orClause.push({ customerId: { $in: matchedIds } });
+                }
+                query.$or = orClause;
             }
 
             const [total, repairs] = await Promise.all([

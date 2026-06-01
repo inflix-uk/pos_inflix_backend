@@ -1,6 +1,22 @@
 const mongoose = require('mongoose');
 const config = require('./index');
 
+// Hosted MongoDB load balancers periodically reap idle TCP connections, which
+// surfaces as "Error: connection N to <host>:<port> closed". Without a listener
+// these bubble up as unhandledRejection and crash the process — the driver
+// itself reconnects fine, so we just log and let it recover.
+function attachConnectionErrorListener(connection, label) {
+    connection.on('error', (err) => {
+        console.warn(`[mongo:${label}] connection error (auto-recovering): ${err.message}`);
+    });
+    connection.on('disconnected', () => {
+        console.warn(`[mongo:${label}] disconnected — driver will retry`);
+    });
+    connection.on('reconnected', () => {
+        console.log(`[mongo:${label}] reconnected`);
+    });
+}
+
 function stripReplicaSetOptions(uri) {
     return uri
         .replace(/([?&])replicaSet=[^&]*&?/i, '$1')
@@ -43,6 +59,7 @@ const connectDB = async () => {
             retryWrites: true,
             retryReads: true
         });
+        attachConnectionErrorListener(conn.connection, 'default');
         console.log(`MongoDB Connected (default): ${conn.connection.host} | DB: ${defaultDbName}`);
     } catch (error) {
         const hasReplSetFlag = /[?&](replicaSet|directConnection)=/i.test(originalUri || '');
@@ -61,6 +78,7 @@ const connectDB = async () => {
                     retryWrites: true,
                     retryReads: true
                 });
+                attachConnectionErrorListener(conn.connection, 'default');
                 console.log(`MongoDB Connected (standalone fallback): ${conn.connection.host} | DB: ${defaultDbName}`);
                 return;
             } catch (fallbackErr) {

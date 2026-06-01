@@ -930,5 +930,7 @@ module.exports = {
     createSalesReturnInTransaction,
     getNextSaleReference,
     round2,
-    resolveCostsForSaleItems
+    resolveCostsForSaleItems,
+    decrementProductQuantitiesWithSession,
+    decrementPurchaseItemQuantitiesWithSession
 };

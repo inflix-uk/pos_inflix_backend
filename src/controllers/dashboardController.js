@@ -306,7 +306,7 @@ exports.globalSearch = asyncHandler(async (req, res) => {
     repairs.forEach((r) => results.push({ type: 'repair', id: r._id.toString(), label: r.reference, url: `/repairs/edit/${r._id}` }));
   }
   if (perms.sales || perms.accounts) {
-    const customers = await Customer.find({ ...tenantMatch, $or: [{ name: regex }, { phone: regex }, { email: regex }] }).limit(5).select('name _id').lean();
+    const customers = await Customer.find({ ...tenantMatch, $or: [{ name: regex }, { contactName: regex }, { phone: regex }, { mobile: regex }, { email: regex }] }).limit(5).select('name _id').lean();
     customers.forEach((c) => results.push({ type: 'customer', id: c._id.toString(), label: c.name, url: `/peoples/customers?search=${encodeURIComponent(c.name)}` }));
   }
   if (perms.parcels) {

@@ -214,9 +214,36 @@ const server = app.listen(PORT, () => {
     })();
 });
 
-// Handle unhandled promise rejections
+// Handle unhandled promise rejections.
+// Hosted Mongo load balancers periodically reap idle TCP connections; the driver
+// reconnects automatically, but the error surfaces here. Swallowing those keeps
+// the process alive instead of restarting on every connection recycle.
+const TRANSIENT_REJECTION_PATTERNS = [
+    /connection \d+ to [\d.]+:\d+ closed/i,
+    /MongoNetworkError/i,
+    /ECONNRESET/i,
+    /ETIMEDOUT/i,
+    /server selection timed out/i,
+    /topology is closed/i,
+];
+function isTransientNetworkError(err) {
+    const msg = (err && (err.message || err.toString())) || '';
+    return TRANSIENT_REJECTION_PATTERNS.some((re) => re.test(msg));
+}
 process.on('unhandledRejection', (err) => {
-    console.log(`Error: ${err.message}`);
+    if (isTransientNetworkError(err)) {
+        console.warn(`[unhandledRejection:transient] ${err.message} — keeping process alive`);
+        return;
+    }
+    console.error(`Error: ${err && err.message ? err.message : err}`);
+    server.close(() => process.exit(1));
+});
+process.on('uncaughtException', (err) => {
+    if (isTransientNetworkError(err)) {
+        console.warn(`[uncaughtException:transient] ${err.message} — keeping process alive`);
+        return;
+    }
+    console.error(`Uncaught: ${err && err.stack ? err.stack : err}`);
     server.close(() => process.exit(1));
 });
 
