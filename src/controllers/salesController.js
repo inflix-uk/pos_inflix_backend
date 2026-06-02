@@ -473,7 +473,7 @@ exports.getSales = asyncHandler(async (req, res) => {
 
     // For list view: exclude heavy items array when not searching (items only needed for search matching, not display)
     const salesQuery = Sale.find(query)
-        .populate('customerId', 'name phone email address')
+        .populate('customerId', 'name contactName phone mobile email address')
         .populate('locationId', 'name')
         .sort({ createdAt: sortOrder })
         .skip(startIndex)
@@ -524,7 +524,7 @@ exports.getSales = asyncHandler(async (req, res) => {
 exports.getSaleById = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
     const sale = await Sale.findOne({ _id: req.params.id, tenantId })
-        .populate('customerId', 'name phone email address')
+        .populate('customerId', 'name contactName phone mobile email address')
         .populate('locationId', 'name address city country phone email')
         .lean();
     if (!sale) {
