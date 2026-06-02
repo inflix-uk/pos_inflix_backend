@@ -7,6 +7,7 @@ const rbacService = require('../services/rbacService');
 const entitlementsService = require('../services/entitlementsService');
 const platformEntitlementsCache = require('../services/platformEntitlementsCache');
 const { invalidateAuthCaches } = require('../middleware/auth');
+const { getUserSalesModeFields } = require('../utils/effectiveRetailMode');
 
 // @desc    Register user
 // @route   POST /api/auth/register
@@ -271,6 +272,7 @@ exports.login = asyncHandler(async (req, res) => {
         userAgent
     });
 
+    const salesMode = await getUserSalesModeFields(user._id);
     res.status(200).json({
         success: true,
         message: 'Login successful',
@@ -280,7 +282,8 @@ exports.login = asyncHandler(async (req, res) => {
             email: user.email,
             role: user.role,
             isPlatformAdmin: !!isPlatformAdmin,
-            suspended: false
+            suspended: false,
+            ...salesMode
         },
         token
     });
@@ -295,15 +298,10 @@ exports.getMe = asyncHandler(async (req, res) => {
     await ensureRbac.ensurePrintingPermissionOnRoles();
     await ensureRbac.ensureSalesModePermissionOnRoles();
     const rbacService = require('../services/rbacService');
-    const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
     rbacService.invalidateUserPermissionCache(req.user._id);
     await rbacService.attachPermissionKeys(req.user);
     const permissionKeys = req.user.permissionKeys ? Array.from(req.user.permissionKeys) : [];
-    const effectiveRetailModeEnabled = await getEffectiveRetailModeEnabled(req.user._id);
-    const preferredRetailModeEnabled =
-        typeof req.user.preferredRetailModeEnabled === 'boolean'
-            ? req.user.preferredRetailModeEnabled
-            : null;
+    const salesMode = await getUserSalesModeFields(req.user._id);
     const assignedLocationIds = (req.user.assignedLocationIds || []).map((id) => (id && id.toString ? id.toString() : String(id)));
     const defaultLocationId = req.user.defaultLocationId ? (req.user.defaultLocationId.toString ? req.user.defaultLocationId.toString() : String(req.user.defaultLocationId)) : null;
     // isPlatformAdmin is set at login and stored in JWT token, no re-check needed
@@ -319,8 +317,7 @@ exports.getMe = asyncHandler(async (req, res) => {
         isPlatformAdmin: !!isPlatformAdmin,
         tenantId: req.user.tenantId != null ? String(req.user.tenantId) : 'default',
         suspended: false,
-        preferredRetailModeEnabled,
-        effectiveRetailModeEnabled,
+        ...salesMode,
     };
     res.status(200).json({
         success: true,
@@ -353,7 +350,7 @@ exports.platformCallback = asyncHandler(async (req, res) => {
         return res.status(403).json({ success: false, message: 'Token is for a different tenant' });
     }
     const email = String(payload.email).toLowerCase().trim();
-    const user = await User.findOne({ email }).select('name email isActive roles role assignedLocationIds defaultLocationId tenantId');
+    const user = await User.findOne({ email }).select('name email isActive roles role assignedLocationIds defaultLocationId tenantId preferredRetailModeEnabled');
     if (!user) {
         return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -399,6 +396,7 @@ exports.platformCallback = asyncHandler(async (req, res) => {
     const defaultLocationId = user.defaultLocationId ? (user.defaultLocationId.toString ? user.defaultLocationId.toString() : String(user.defaultLocationId)) : null;
     const platformEmails = (process.env.PLATFORM_ADMIN_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
     const isPlatformAdmin = platformEmails.length > 0 && user.email && platformEmails.includes((user.email || '').toLowerCase().trim());
+    const salesMode = await getUserSalesModeFields(user._id);
     const data = {
         _id: user._id,
         name: user.name,
@@ -409,6 +407,7 @@ exports.platformCallback = asyncHandler(async (req, res) => {
         defaultLocationId,
         isPlatformAdmin: !!isPlatformAdmin,
         tenantId: user.tenantId != null ? String(user.tenantId) : 'default',
+        ...salesMode,
     };
     res.status(200).json({ success: true, token: jwtToken, data });
 });

@@ -17,4 +17,20 @@ async function getEffectiveRetailModeEnabled(userId) {
     return !!gs.retailModeEnabled;
 }
 
-module.exports = { getEffectiveRetailModeEnabled };
+/** Preferred + effective retail mode for API responses (always reads from DB). */
+async function getUserSalesModeFields(userId) {
+    if (!userId) {
+        const gs = await GeneralSettings.getSettings();
+        const effectiveRetailModeEnabled = !!gs.retailModeEnabled;
+        return { preferredRetailModeEnabled: null, effectiveRetailModeEnabled };
+    }
+    const user = await User.findById(userId).select('preferredRetailModeEnabled').lean();
+    const preferredRetailModeEnabled =
+        user && typeof user.preferredRetailModeEnabled === 'boolean'
+            ? user.preferredRetailModeEnabled
+            : null;
+    const effectiveRetailModeEnabled = await getEffectiveRetailModeEnabled(userId);
+    return { preferredRetailModeEnabled, effectiveRetailModeEnabled };
+}
+
+module.exports = { getEffectiveRetailModeEnabled, getUserSalesModeFields };

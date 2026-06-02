@@ -20,6 +20,7 @@ const {
     legacyFindInStockSerials,
     invalidateStockPurchasesCache,
     invalidateStockSerialSetCache,
+    invalidateForSalesCache,
 } = require('./purchaseController');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
@@ -37,6 +38,7 @@ async function invalidateSalesCaches(tenantId) {
     await cache.bumpMany(SALES_CACHE_NAMESPACES, tenantId);
     // Inventory products page reads from SWR caches in purchaseController; without these,
     // the non-serial qty stays stale (up to maxStaleMs) even though Purchase.items.quantity was decremented.
+    invalidateForSalesCache?.(tenantId);
     invalidateStockPurchasesCache?.(tenantId);
     invalidateStockSerialSetCache?.(tenantId);
 }

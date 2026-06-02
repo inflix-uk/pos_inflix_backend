@@ -46,7 +46,9 @@ const protect = async (req, res, next) => {
         if (cachedUser) {
             req.user = { ...cachedUser };
         } else {
-            const dbUser = await User.findById(decoded.id).select('name email isActive roles role assignedLocationIds defaultLocationId tenantId').lean();
+            const dbUser = await User.findById(decoded.id)
+                .select('name email isActive roles role assignedLocationIds defaultLocationId tenantId preferredRetailModeEnabled')
+                .lean();
             if (dbUser) setCachedUser(decoded.id, dbUser);
             req.user = dbUser;
         }
@@ -327,7 +329,8 @@ const optionalProtect = async (req, res, next) => {
     if (!token) return next();
     try {
         const decoded = jwt.verify(token, config.jwtSecret);
-        const user = await User.findById(decoded.id).select('name email isActive roles role assignedLocationIds defaultLocationId tenantId');
+        const user = await User.findById(decoded.id)
+            .select('name email isActive roles role assignedLocationIds defaultLocationId tenantId preferredRetailModeEnabled');
         if (user && user.isActive) {
             await rbacService.attachPermissionKeys(user);
             req.user = user;

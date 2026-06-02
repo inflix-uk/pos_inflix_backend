@@ -18,6 +18,9 @@ const {
     decrementPurchaseItemQuantitiesWithSession,
 } = require('../services/salesTransactionService');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
+const { invalidateInventoryListCaches } = require('./purchaseController');
+const serialIndexService = require('../services/serialIndexService');
+const stockItemService = require('../services/stockItemService');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -250,6 +253,45 @@ const createInvoice = asyncHandler(async (req, res) => {
         }
     } catch (err) {
         console.warn('[Invoice sold] snapshot failed:', err.message);
+    }
+
+    // Create-invoice grid uses GET /purchases?forSales=1 (30s in-memory cache). Without this,
+    // sold-out lines like a single-qty "Test" item still appear until the cache TTL expires.
+    await invalidateInventoryListCaches(tenantId).catch((e) => {
+        console.warn('[createInvoice] cache invalidation failed (non-fatal):', e.message);
+    });
+
+    const refLabel = invoice.reference || `Invoice ${invoice._id}`;
+    const customerName = invoice.customerName ? String(invoice.customerName).trim() : '';
+    const soldSerials = itemsIn.flatMap((item) =>
+        (Array.isArray(item.serialNumbers) ? item.serialNumbers : [])
+            .map((s) => (s && String(s).trim()) || '')
+            .filter(Boolean)
+    );
+    for (const serial of soldSerials) {
+        serialIndexService.upsertSerialIndex(tenantId, {
+            serial,
+            status: 'sold',
+            saleId: invoice._id,
+            saleReferenceSnapshot: refLabel,
+            customerNameSnapshot: customerName,
+        }).catch(() => {});
+    }
+    if (soldSerials.length > 0) {
+        stockItemService.markSold(soldSerials, {
+            tenantId,
+            saleId: invoice._id,
+            customerName,
+            saleReference: refLabel,
+        }).catch(() => {});
+    }
+    for (const item of itemsIn) {
+        const serials = Array.isArray(item.serialNumbers) ? item.serialNumbers : [];
+        if (serials.length > 0) continue;
+        const qty = Number(item.quantity) || 0;
+        if (qty > 0 && item.purchaseId && item.purchaseItemId) {
+            stockItemService.decrementNonSerialQty(tenantId, item.purchaseId, item.purchaseItemId, qty).catch(() => {});
+        }
     }
 
     res.status(201).json({ success: true, data: invoice });

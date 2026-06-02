@@ -47,9 +47,17 @@ function _fsCacheSet(key, data) {
     }
 }
 
-/** Invalidate forSales cache for a tenant (call after purchase create/update/delete) */
+/** Invalidate forSales cache for a tenant (call after purchase create/update/delete or stock-changing sales/invoices) */
 function invalidateForSalesCache(tenantId) {
     for (const [k] of _forSalesCache) { if (k.startsWith(tenantId + '|')) _forSalesCache.delete(k); }
+}
+
+/** Clear create-sales / create-invoice product list caches after any stock mutation. */
+async function invalidateInventoryListCaches(tenantId) {
+    invalidateForSalesCache(tenantId);
+    invalidateTypeaheadCache(tenantId);
+    exports.invalidateStockPurchasesCache(tenantId);
+    await cache.bumpMany(['purchases:list'], tenantId);
 }
 
 /**
@@ -2647,6 +2655,8 @@ function invalidateTypeaheadCache(tenantId) {
     _typeaheadSoldCache.delete(tenantId);
 }
 exports.invalidateTypeaheadCache = invalidateTypeaheadCache;
+exports.invalidateForSalesCache = invalidateForSalesCache;
+exports.invalidateInventoryListCaches = invalidateInventoryListCaches;
 
 /** True when the term looks like a scanned IMEI/serial/barcode (≥7 alphanumeric, mostly digits). */
 function looksLikeSerialBarcode(term) {

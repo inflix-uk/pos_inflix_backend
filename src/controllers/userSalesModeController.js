@@ -1,7 +1,8 @@
 const asyncHandler = require('../middleware/asyncHandler');
 const User = require('../models/User');
-const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
+const { getUserSalesModeFields } = require('../utils/effectiveRetailMode');
 const rbacService = require('../services/rbacService');
+const { invalidateAuthCaches } = require('../middleware/auth');
 
 // @desc    Get current user's sales mode preference and effective mode
 // @route   GET /api/settings/my-sales-mode
@@ -12,17 +13,10 @@ exports.getMySalesMode = asyncHandler(async (req, res) => {
     if (!canOwn && !canManage) {
         return res.status(403).json({ success: false, message: 'Not authorized' });
     }
-    const user = await User.findById(req.user._id).select('preferredRetailModeEnabled').lean();
-    const effectiveRetailModeEnabled = await getEffectiveRetailModeEnabled(req.user._id);
+    const salesMode = await getUserSalesModeFields(req.user._id);
     res.status(200).json({
         success: true,
-        data: {
-            preferredRetailModeEnabled:
-                user && typeof user.preferredRetailModeEnabled === 'boolean'
-                    ? user.preferredRetailModeEnabled
-                    : null,
-            effectiveRetailModeEnabled
-        }
+        data: salesMode
     });
 });
 
@@ -39,17 +33,16 @@ exports.updateMySalesMode = asyncHandler(async (req, res) => {
     }
     const user = await User.findByIdAndUpdate(
         req.user._id,
-        { preferredRetailModeEnabled: retailModeEnabled },
+        { $set: { preferredRetailModeEnabled: retailModeEnabled } },
         { new: true, runValidators: true }
-    ).select('preferredRetailModeEnabled');
+    ).select('preferredRetailModeEnabled tenantId');
     if (!user) {
         return res.status(404).json({ success: false, message: 'User not found' });
     }
+    invalidateAuthCaches(user._id, user.tenantId);
+    const salesMode = await getUserSalesModeFields(user._id);
     res.status(200).json({
         success: true,
-        data: {
-            preferredRetailModeEnabled: user.preferredRetailModeEnabled,
-            effectiveRetailModeEnabled: user.preferredRetailModeEnabled
-        }
+        data: salesMode
     });
 });
