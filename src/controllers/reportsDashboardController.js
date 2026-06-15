@@ -12,6 +12,8 @@ const Repair = require('../models/Repair');
 const asyncHandler = require('../middleware/asyncHandler');
 const redis = require('../lib/redis');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
+const { canViewHistoricalSales } = require('../utils/salesDateAccess');
+const { getLondonDateKey } = require('../utils/dateKey');
 const { getTenantIdFromReq } = require('../middleware/auth');
 
 /**
@@ -19,8 +21,13 @@ const { getTenantIdFromReq } = require('../middleware/auth');
  * Sums metrics across dateKey range. locationId=all or omitted → tenant (or user-scoped locations); else single location.
  */
 exports.getSummary = asyncHandler(async (req, res) => {
-  const from = (req.query.from || '').trim();
-  const to = (req.query.to || '').trim();
+  let from = (req.query.from || '').trim();
+  let to = (req.query.to || '').trim();
+  if (!canViewHistoricalSales(req.user)) {
+    const todayLondon = getLondonDateKey(new Date());
+    from = todayLondon;
+    to = todayLondon;
+  }
   const locationIdParam = (req.query.locationId || 'all').trim().toLowerCase();
   const userScope = getUserLocationScope(req.user);
 
@@ -147,8 +154,13 @@ exports.getSummary = asyncHandler(async (req, res) => {
  * Returns top 10 and bottom 10 locations by the given metric (summed over date range), with location names.
  */
 exports.getByLocation = asyncHandler(async (req, res) => {
-  const from = (req.query.from || '').trim();
-  const to = (req.query.to || '').trim();
+  let from = (req.query.from || '').trim();
+  let to = (req.query.to || '').trim();
+  if (!canViewHistoricalSales(req.user)) {
+    const todayLondon = getLondonDateKey(new Date());
+    from = todayLondon;
+    to = todayLondon;
+  }
   const metric = (req.query.metric || 'salesRevenueGross').trim();
   const userScope = getUserLocationScope(req.user);
 

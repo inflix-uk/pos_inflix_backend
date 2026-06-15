@@ -25,6 +25,11 @@ const {
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
+const {
+    canViewHistoricalSales,
+    applySalesDateRestriction,
+    assertSaleViewableByUser,
+} = require('../utils/salesDateAccess');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 const {
@@ -341,9 +346,11 @@ exports.getSales = asyncHandler(async (req, res) => {
     const mongoose = require('mongoose');
 
     const userScopeForCache = getUserLocationScope(req.user);
+    const salesDateScope = canViewHistoricalSales(req.user) ? 'all' : 'todayOnly';
     const cacheParams = {
         page, limit,
         userScope: Array.isArray(userScopeForCache) ? [...userScopeForCache].sort() : null,
+        salesDateScope,
         locationId: req.query.locationId || null,
         type: req.query.type || null,
         paymentMethod: req.query.paymentMethod || null,
@@ -385,22 +392,30 @@ exports.getSales = asyncHandler(async (req, res) => {
         query.paymentMethod = String(req.query.paymentMethod);
     }
 
-    const fromQ = req.query.from && String(req.query.from).trim();
-    const toQ = req.query.to && String(req.query.to).trim();
-    if (fromQ || toQ) {
-        query.createdAt = {};
-        if (fromQ) {
-            const d = new Date(fromQ);
-            if (!Number.isNaN(d.getTime())) query.createdAt.$gte = d;
-        }
-        if (toQ) {
-            const end = new Date(toQ);
-            if (!Number.isNaN(end.getTime())) {
-                end.setHours(23, 59, 59, 999);
-                query.createdAt.$lte = end;
+    const dateRestriction = applySalesDateRestriction(req.user, {
+        from: req.query.from,
+        to: req.query.to,
+    });
+    if (dateRestriction.restricted) {
+        query.createdAt = { $gte: dateRestriction.from, $lte: dateRestriction.to };
+    } else {
+        const fromQ = req.query.from && String(req.query.from).trim();
+        const toQ = req.query.to && String(req.query.to).trim();
+        if (fromQ || toQ) {
+            query.createdAt = {};
+            if (fromQ) {
+                const d = new Date(fromQ);
+                if (!Number.isNaN(d.getTime())) query.createdAt.$gte = d;
             }
+            if (toQ) {
+                const end = new Date(toQ);
+                if (!Number.isNaN(end.getTime())) {
+                    end.setHours(23, 59, 59, 999);
+                    query.createdAt.$lte = end;
+                }
+            }
+            if (Object.keys(query.createdAt).length === 0) delete query.createdAt;
         }
-        if (Object.keys(query.createdAt).length === 0) delete query.createdAt;
     }
 
     const minTotal = req.query.minTotal != null && String(req.query.minTotal).trim() !== '' ? Number(req.query.minTotal) : null;
@@ -539,6 +554,12 @@ exports.getSaleById = asyncHandler(async (req, res) => {
             return res.status(404).json({ success: false, message: 'Sale not found' });
         }
     }
+
+    const saleViewCheck = assertSaleViewableByUser(req.user, sale);
+    if (!saleViewCheck.ok) {
+        return res.status(saleViewCheck.status).json({ success: false, message: saleViewCheck.message });
+    }
+
     const ref = (sale.reference || '').trim();
     const hasReturn = ref
         ? (await SalesReturn.countDocuments({ linkedInvoiceRef: ref, tenantId })) > 0

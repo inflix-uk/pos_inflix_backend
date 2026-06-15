@@ -6,6 +6,7 @@
 
 const mongoose = require('mongoose');
 const { getLondonDateKey } = require('../utils/dateKey');
+const { canViewHistoricalSales, getTodayLondonBounds } = require('../utils/salesDateAccess');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const LocationDailyMetric = require('../models/LocationDailyMetric');
@@ -163,6 +164,16 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     useUtcRange = true;
     from = getLondonDateKey(fromUtc);
     to = getLondonDateKey(toUtc);
+  }
+
+  if (!canViewHistoricalSales(req.user)) {
+    from = todayLondon;
+    to = todayLondon;
+    if (useUtcRange) {
+      const bounds = getTodayLondonBounds();
+      fromUtc = bounds.fromUtc;
+      toUtc = bounds.toUtc;
+    }
   }
 
   const scopeKey = (userScope && userScope.length) ? userScope.sort().join(',') : 'all';

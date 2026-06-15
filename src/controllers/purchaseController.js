@@ -1,4 +1,6 @@
 const Purchase = require('../models/Purchase');
+const Supplier = require('../models/Supplier');
+const Customer = require('../models/Customer');
 const Product = require('../models/Product');
 const StockItem = require('../models/StockItem');
 const ProductGroupPrice = require('../models/ProductGroupPrice');
@@ -658,6 +660,44 @@ async function resolveGroupPricesForPurchases(data, tenantId, pricingGroupId) {
     });
 }
 
+/** Escape special chars for use in RegExp */
+function escapeRegex(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Build $or conditions for purchase list search (reference, supplier company name, contact name). */
+async function buildPurchaseListSearchOr(searchTerm) {
+    const trimmed = String(searchTerm || '').trim();
+    if (!trimmed) return null;
+    const regex = { $regex: escapeRegex(trimmed), $options: 'i' };
+    const orConditions = [
+        { purchaseNumber: regex },
+        { parcelNumber: regex },
+    ];
+
+    const [suppliers, customers] = await Promise.all([
+        Supplier.find({
+            $or: [{ name: regex }, { contactPerson: regex }],
+        }).select('_id').lean(),
+        Customer.find({
+            $or: [{ name: regex }, { contactName: regex }],
+        }).select('_id').lean(),
+    ]);
+
+    const supplierIds = suppliers.map((s) => s._id);
+    const customerIds = customers.map((c) => c._id);
+
+    if (supplierIds.length > 0) {
+        orConditions.push({ supplier: { $in: supplierIds } });
+    }
+    const accountIds = [...supplierIds, ...customerIds];
+    if (accountIds.length > 0) {
+        orConditions.push({ account: { $in: accountIds } });
+    }
+
+    return orConditions;
+}
+
 // @route   GET /api/purchases
 // @access  Private
 exports.getPurchases = asyncHandler(async (req, res) => {
@@ -697,10 +737,10 @@ exports.getPurchases = asyncHandler(async (req, res) => {
     }
 
     if (req.query.search) {
-        query.$or = [
-            { purchaseNumber: { $regex: req.query.search, $options: 'i' } },
-            { parcelNumber: { $regex: req.query.search, $options: 'i' } }
-        ];
+        const searchOr = await buildPurchaseListSearchOr(req.query.search);
+        if (searchOr) {
+            query.$or = searchOr;
+        }
     }
 
     // When forSales=1 (create-sales non-serial grid), only load purchases that have at least one non-serial item — much faster.
@@ -1484,11 +1524,6 @@ async function getNextPurchaseNumber(tenantId) {
         if (match) seq = parseInt(match[1], 10) + 1;
     }
     return `PUR-${String(seq).padStart(6, '0')}`;
-}
-
-/** Escape special chars for use in RegExp */
-function escapeRegex(s) {
-    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**

@@ -9,6 +9,7 @@ const AuditEvent = require('../models/AuditEvent');
 const SerialHistory = require('../models/SerialHistory');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getDashboardPermissions, getUserLocationScope } = require('../utils/dashboardHelpers');
+const { canViewHistoricalSales, getTodayLondonBounds } = require('../utils/salesDateAccess');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { formatSupplierLabel } = require('../utils/supplierDisplay');
 const { computeLowStockRows } = require('./inventoryLowStocksController');
@@ -55,8 +56,13 @@ exports.UNKNOWN_LOCATION_VALUE = UNKNOWN_LOCATION_VALUE;
  */
 exports.getDashboard = asyncHandler(async (req, res) => {
   const tenantId = getTenantIdFromReq(req);
-  const fromUtc = req.query.fromUtc ? new Date(req.query.fromUtc) : null;
-  const toUtc = req.query.toUtc ? new Date(req.query.toUtc) : null;
+  let fromUtc = req.query.fromUtc ? new Date(req.query.fromUtc) : null;
+  let toUtc = req.query.toUtc ? new Date(req.query.toUtc) : null;
+  if (!canViewHistoricalSales(req.user)) {
+    const todayBounds = getTodayLondonBounds();
+    fromUtc = todayBounds.fromUtc;
+    toUtc = todayBounds.toUtc;
+  }
   const userScope = getUserLocationScope(req.user);
   const locationFilter = getLocationFilter(req.query, userScope);
   const perms = getDashboardPermissions(req.user);
