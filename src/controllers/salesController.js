@@ -362,6 +362,7 @@ exports.getSales = asyncHandler(async (req, res) => {
         search: req.query.search || null,
         order: req.query.order || null,
         includeItems: req.query.includeItems === 'true' ? '1' : null,
+        customerId: req.query.customerId || null,
     };
 
     const payload = await cache.cached(
@@ -387,6 +388,11 @@ exports.getSales = asyncHandler(async (req, res) => {
     }
 
     if (req.query.type) query.type = req.query.type;
+
+    const customerIdParam = req.query.customerId && String(req.query.customerId).trim();
+    if (customerIdParam && mongoose.Types.ObjectId.isValid(customerIdParam)) {
+        query.customerId = new mongoose.Types.ObjectId(customerIdParam);
+    }
 
     if (req.query.paymentMethod && ['cash', 'card', 'credit', 'bank'].includes(String(req.query.paymentMethod))) {
         query.paymentMethod = String(req.query.paymentMethod);

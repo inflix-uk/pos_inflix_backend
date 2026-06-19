@@ -6,6 +6,7 @@ const { protect, requirePermission } = require('../middleware/auth');
 const {
     getCustomers,
     getCustomer,
+    getCustomerSummary,
     getOrCreateWalkInCustomer,
     createCustomer,
     updateCustomer,
@@ -36,6 +37,8 @@ router.route('/')
 router.get('/walk-in', requirePermission('sale.create', 'settings.view'), getOrCreateWalkInCustomer);
 
 router.delete('/recent', requirePermission('customer.view', 'customer.edit'), deleteRecentCustomers);
+
+router.get('/:id/summary', requirePermission('customer.view'), getCustomerSummary);
 
 router.route('/:id')
     .get(requirePermission('customer.view'), getCustomer)

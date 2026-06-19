@@ -1,6 +1,7 @@
 const Customer = require('../models/Customer');
 const LedgerEntry = require('../models/LedgerEntry');
 const PricingGroup = require('../models/PricingGroup');
+const Sale = require('../models/Sale');
 const mongoose = require('mongoose');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
@@ -99,6 +100,82 @@ exports.getCustomer = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         data: customer
+    });
+});
+
+// @desc    Get customer 360 summary (profile + pricing group + sale stats)
+// @route   GET /api/customers/:id/summary
+// @access  Private
+exports.getCustomerSummary = asyncHandler(async (req, res) => {
+    const tenantId = getTenantIdFromReq(req);
+    const customerId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+        return res.status(400).json({ success: false, message: 'Invalid customer id' });
+    }
+
+    const customer = await Customer.findOne({ _id: customerId, tenantId })
+        .populate('pricingGroupId', 'name')
+        .lean();
+
+    if (!customer) {
+        return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+
+    const balance = customer.balance != null ? round2(customer.balance) : 0;
+    const custObjId = new mongoose.Types.ObjectId(customerId);
+
+    const [saleAgg] = await Sale.aggregate([
+        {
+            $match: {
+                tenantId,
+                customerId: custObjId,
+                status: { $ne: 'voided' }
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                saleCount: { $sum: 1 },
+                lastSaleAt: { $max: '$createdAt' }
+            }
+        }
+    ]);
+
+    let lastSaleReference = null;
+    if (saleAgg && saleAgg.lastSaleAt) {
+        const lastSale = await Sale.findOne({
+            tenantId,
+            customerId: custObjId,
+            status: { $ne: 'voided' },
+            createdAt: saleAgg.lastSaleAt
+        })
+            .select('reference')
+            .lean();
+        lastSaleReference = lastSale?.reference || null;
+    }
+
+    const pricingGroup = customer.pricingGroupId
+        ? {
+            _id: customer.pricingGroupId._id,
+            name: customer.pricingGroupId.name
+        }
+        : null;
+
+    const { pricingGroupId: _pg, ...customerFields } = customer;
+    customerFields.balance = balance;
+
+    res.status(200).json({
+        success: true,
+        data: {
+            customer: customerFields,
+            pricingGroup,
+            stats: {
+                saleCount: saleAgg?.saleCount || 0,
+                lastSaleAt: saleAgg?.lastSaleAt || null,
+                lastSaleReference,
+                openBalance: balance
+            }
+        }
     });
 });
 
