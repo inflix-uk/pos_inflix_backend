@@ -21,6 +21,8 @@ const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries
 const { invalidateInventoryListCaches } = require('./purchaseController');
 const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
+const EmailSettings = require('../models/EmailSettings');
+const emailService = require('../lib/emailService');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -426,6 +428,71 @@ const getNextReference = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, data: { reference: nextAvailable } });
 });
 
+const sendInvoiceByEmail = asyncHandler(async (req, res) => {
+    const invoice = await Invoice.findById(req.params.id).lean();
+    if (!invoice) {
+        return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const { to, pdfBase64, filename } = req.body || {};
+    const toTrim = String(to || '').trim();
+    if (!toTrim) {
+        return res.status(400).json({ success: false, message: 'Recipient email is required' });
+    }
+    if (!/^\S+@\S+\.\S+$/.test(toTrim)) {
+        return res.status(400).json({ success: false, message: 'Invalid email address' });
+    }
+    if (!pdfBase64) {
+        return res.status(400).json({ success: false, message: 'PDF attachment is required' });
+    }
+
+    const settings = await EmailSettings.findOne();
+    if (!settings) {
+        return res.status(503).json({
+            success: false,
+            message: 'Email is not configured. Go to Settings → Email and save your SMTP settings.',
+        });
+    }
+
+    let pdfBuffer;
+    try {
+        pdfBuffer = Buffer.from(String(pdfBase64), 'base64');
+    } catch {
+        return res.status(400).json({ success: false, message: 'Invalid PDF data' });
+    }
+    if (!pdfBuffer.length || pdfBuffer.length < 100) {
+        return res.status(400).json({ success: false, message: 'PDF attachment is empty or invalid' });
+    }
+
+    const ref = invoice.reference || 'invoice';
+    const customer = invoice.customerName || 'Customer';
+    const safeFilename = String(filename || `invoice-${ref}.pdf`).replace(/[/\\]/g, '_');
+    const subject = `Invoice ${ref} — ${customer}`;
+    const text = `Please find attached invoice ${ref} for ${customer}.`;
+    const html = `<p>Please find attached invoice <strong>${ref}</strong> for <strong>${customer}</strong>.</p>`;
+
+    try {
+        await emailService.sendWithPdfAttachment(settings, {
+            to: toTrim,
+            subject,
+            text,
+            html,
+            pdfBuffer,
+            filename: safeFilename,
+        });
+    } catch (err) {
+        return res.status(502).json({
+            success: false,
+            message: err.message || 'Failed to send email',
+        });
+    }
+
+    res.status(200).json({
+        success: true,
+        message: `Invoice emailed to ${toTrim}`,
+    });
+});
+
 module.exports = {
     getInvoices,
     getInvoiceById,
@@ -435,4 +502,5 @@ module.exports = {
     deleteInvoice,
     checkReference,
     getNextReference,
+    sendInvoiceByEmail,
 };

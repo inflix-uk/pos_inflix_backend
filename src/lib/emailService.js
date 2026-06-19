@@ -63,9 +63,26 @@ async function sendTestEmail(settings, testEmail) {
     });
 }
 
+async function sendWithPdfAttachment(settings, { to, subject, text, html, pdfBuffer, filename }) {
+    return sendMail(settings, {
+        to,
+        subject,
+        text,
+        html,
+        attachments: [
+            {
+                filename,
+                content: pdfBuffer,
+                contentType: 'application/pdf',
+            },
+        ],
+    });
+}
+
 module.exports = {
     transportOptionsFromSettings,
     sendMail,
     sendTestEmail,
+    sendWithPdfAttachment,
     getEmailSettings,
 };
