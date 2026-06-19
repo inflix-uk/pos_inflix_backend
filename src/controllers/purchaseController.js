@@ -818,7 +818,8 @@ exports.getPurchases = asyncHandler(async (req, res) => {
                     dataInner = dataInner.map((p) => {
                         const filteredItems = (p.items || []).filter((it) => {
                             const sendTo = it.sendTo;
-                            if (!sendTo) return false;
+                            // Items without sendTo are unassigned — visible at every location (e.g. import omitting location).
+                            if (!sendTo) return true;
                             const id = typeof sendTo === 'object' ? String(sendTo._id) : String(sendTo);
                             return id === locationId;
                         });
@@ -923,7 +924,8 @@ exports.getPurchases = asyncHandler(async (req, res) => {
         data = data.map((p) => {
             const filteredItems = (p.items || []).filter((it) => {
                 const sendTo = it.sendTo;
-                if (!sendTo) return false;
+                // Items without sendTo are unassigned — visible at every location (e.g. import omitting location).
+                if (!sendTo) return true;
                 const id = typeof sendTo === 'object' ? String(sendTo._id) : String(sendTo);
                 return id === locationId;
             });
@@ -1332,9 +1334,10 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
         if (search && !r._searchable.includes(search)) continue;
         if (locationId) {
             const sendTo = r.sendTo;
-            if (!sendTo) continue;
-            const id = typeof sendTo === 'object' ? String(sendTo._id) : String(sendTo);
-            if (id !== locationId) continue;
+            if (sendTo) {
+                const id = typeof sendTo === 'object' ? String(sendTo._id) : String(sendTo);
+                if (id !== locationId) continue;
+            }
         }
         rows.push(r);
     }
