@@ -1,4 +1,5 @@
 const EmailSettings = require('../models/EmailSettings');
+const emailService = require('../lib/emailService');
 const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
@@ -214,34 +215,17 @@ exports.testEmailSettings = asyncHandler(async (req, res) => {
         });
     }
 
-    // Here you would implement the actual email sending logic
-    // For now, we'll just return a success response
-    // In production, you would use nodemailer or similar
-
-    /*
-    const nodemailer = require('nodemailer');
-
-    const transporter = nodemailer.createTransport({
-        host: settings.smtpHost,
-        port: settings.smtpPort,
-        secure: settings.smtpSecure === 'ssl',
-        auth: {
-            user: settings.smtpUsername,
-            pass: settings.smtpPassword,
-        },
-    });
-
-    await transporter.sendMail({
-        from: `"${settings.fromName}" <${settings.fromEmail}>`,
-        to: testEmail,
-        subject: 'Test Email from POS System',
-        text: 'This is a test email to verify your email settings are working correctly.',
-        html: '<p>This is a test email to verify your email settings are working correctly.</p>',
-    });
-    */
+    try {
+        await emailService.sendTestEmail(settings, testEmail);
+    } catch (err) {
+        return res.status(502).json({
+            success: false,
+            message: err.message || 'Failed to send test email'
+        });
+    }
 
     res.status(200).json({
         success: true,
-        message: `Test email would be sent to ${testEmail}. Note: Email sending not implemented in this demo.`
+        message: `Test email sent to ${testEmail}`
     });
 });
