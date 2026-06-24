@@ -22,6 +22,8 @@ const {
     findActiveSoldSerialsAmong,
 } = require('../utils/activeSoldSerialQueries');
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
+const { normalizePurchaseItems } = require('../utils/normalizePurchaseItems');
+const { formatProductName } = require('../utils/formatProductName');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -1623,46 +1625,8 @@ exports.createPurchase = asyncHandler(async (req, res) => {
         }
     }
 
-    // Normalize items: uppercase text fields, variantValues as ordered array in CAPS
-    // Store variantValues in a fixed loop order: brand → model → then other attributes (consistent DB structure)
-    const VARIANT_SLUG_ORDER = ['brands', 'brand', 'brands_model', 'brand_model', 'make', 'grade', 'storage', 'capacity', 'color', 'colour', 'condition'];
-    const variantSlugRank = (slug) => {
-        const i = VARIANT_SLUG_ORDER.indexOf((slug || '').toLowerCase());
-        return i === -1 ? VARIANT_SLUG_ORDER.length : i;
-    };
-
-    const toUpper = (s) => (s != null && String(s).trim() !== '' ? String(s).trim().toUpperCase() : s);
     if (req.body.items && req.body.items.length > 0) {
-        req.body.items = req.body.items.map((item) => {
-            const normalized = { ...item };
-            if (normalized.grade != null) normalized.grade = toUpper(normalized.grade);
-            if (normalized.brand != null) normalized.brand = toUpper(normalized.brand);
-            if (normalized.brandModel != null) normalized.brandModel = toUpper(normalized.brandModel);
-            if (normalized.capacity != null) normalized.capacity = toUpper(normalized.capacity);
-            if (normalized.colour != null) normalized.colour = toUpper(normalized.colour);
-            if (normalized.variantValues != null) {
-                if (Array.isArray(normalized.variantValues)) {
-                    normalized.variantValues = normalized.variantValues
-                        .map((entry) => ({
-                            slug: entry.slug || '',
-                            value: toUpper(entry.value) || ''
-                        }))
-                        .filter((e) => e.slug)
-                        .sort((a, b) => variantSlugRank(a.slug) - variantSlugRank(b.slug));
-                } else if (typeof normalized.variantValues === 'object') {
-                    normalized.variantValues = Object.entries(normalized.variantValues)
-                        .map(([slug, value]) => ({
-                            slug,
-                            value: toUpper(value) || ''
-                        }))
-                        .filter((e) => e.value !== undefined && e.value !== null)
-                        .sort((a, b) => variantSlugRank(a.slug) - variantSlugRank(b.slug));
-                }
-            } else {
-                normalized.variantValues = [];
-            }
-            return normalized;
-        });
+        req.body.items = normalizePurchaseItems(req.body.items);
         req.body.items = dedupeOtherItemsByBarcodeKeepingFirst(req.body.items);
         recomputePurchaseAggregatesFromItems(req.body);
     }
@@ -1714,7 +1678,7 @@ exports.createPurchase = asyncHandler(async (req, res) => {
                 const serial = serialIndexService.normalizeSerial(imei);
                 if (!serial) continue;
                 const parts = [it.brand, it.brandModel, it.capacity, it.colour].filter(Boolean);
-                const name = parts.length > 0 ? parts.join(' ') : (it.name && it.name.trim() ? it.name.trim() : 'Product');
+                const name = formatProductName(parts.length > 0 ? parts.join(' ') : (it.name && it.name.trim() ? it.name.trim() : 'Product'));
                 const skuSnapshot = `${purchase._id}-${it._id}`;
                 serialIndexService.upsertSerialIndex(tenantId, {
                     serial,
@@ -1838,6 +1802,7 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
                 });
             }
         }
+        req.body.items = normalizePurchaseItems(req.body.items);
         req.body.items = dedupeOtherItemsByBarcodeKeepingFirst(req.body.items);
         recomputePurchaseAggregatesFromItems(req.body);
         const uniqueness = await validateUniqueBarcodeAndImei(req.body.items, req.params.id, tenantId);
@@ -1869,7 +1834,7 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
                 const serial = serialIndexService.normalizeSerial(imei);
                 if (!serial) continue;
                 const parts = [it.brand, it.brandModel, it.capacity, it.colour].filter(Boolean);
-                const name = parts.length > 0 ? parts.join(' ') : (it.name && it.name.trim() ? it.name.trim() : 'Product');
+                const name = formatProductName(parts.length > 0 ? parts.join(' ') : (it.name && it.name.trim() ? it.name.trim() : 'Product'));
                 const skuSnapshot = `${purchase._id}-${it._id}`;
                 serialIndexService.upsertSerialIndex(tenantId, {
                     serial,
@@ -2058,7 +2023,7 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     // Serial lookup with no pricing group uses legacy (DB) for price, so the correct price is always from the purchase document.
     if ((salePrice !== null || purchasePrice !== null) && Array.isArray(item.imeis) && item.imeis.length > 0) {
         const parts = [item.brand, item.brandModel, item.capacity, item.colour].filter(Boolean);
-        const productNameSnapshot = parts.length > 0 ? parts.join(' ') : (item.name && String(item.name).trim() ? String(item.name).trim() : 'Product');
+        const productNameSnapshot = formatProductName(parts.length > 0 ? parts.join(' ') : (item.name && String(item.name).trim() ? String(item.name).trim() : 'Product'));
         const skuSnapshot = `${purchase._id}-${item._id}`;
         const payload = {
             status: 'in_stock',

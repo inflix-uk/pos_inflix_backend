@@ -16,6 +16,7 @@ const { getTenantIdFromReq } = require('../middleware/auth');
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const { formatProductName } = require('../utils/formatProductName');
 
 const PRODUCT_CACHE_NAMESPACES = ['products:list', 'products:byId', 'products:lowStock', 'products:expired', 'products:expiringSoon'];
 async function invalidateProductCaches(tenantId) {
@@ -499,6 +500,7 @@ exports.createProduct = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
     const body = { ...req.body };
     if (body.tenantId !== undefined) delete body.tenantId;
+    if (body.name) body.name = formatProductName(body.name);
     const product = await Product.create({ ...body, tenantId });
 
     // Create initial inventory record
@@ -542,6 +544,7 @@ exports.updateProduct = asyncHandler(async (req, res) => {
     // Don't update quantity through this endpoint
     const beforeSnapshot = product.toObject();
     delete req.body.quantity;
+    if (req.body.name) req.body.name = formatProductName(req.body.name);
 
     product = await Product.findByIdAndUpdate(req.params.id, req.body, {
         new: true,

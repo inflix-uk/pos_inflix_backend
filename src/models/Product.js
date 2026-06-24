@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { formatProductName } = require('../utils/formatProductName');
 
 const productSchema = new mongoose.Schema({
     name: {
@@ -160,5 +161,12 @@ productSchema.index({ tenantId: 1, sku: 1 });
 productSchema.index({ tenantId: 1, isActive: 1, category: 1 });
 // Compound: covers low-stocks supplier filter Product.find({ isActive, supplier }).
 productSchema.index({ tenantId: 1, isActive: 1, supplier: 1 });
+
+productSchema.pre('save', function (next) {
+    if (this.isModified('name') && this.name) {
+        this.name = formatProductName(this.name);
+    }
+    next();
+});
 
 module.exports = require('../lib/tenantModel')('Product', productSchema);
