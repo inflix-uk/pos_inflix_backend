@@ -31,10 +31,23 @@ function computeRemainingAmountDue(fields) {
     return round2(Math.max(0, totalOwing - paidNow));
 }
 
+/** Build payments breakdown from a single method + amount (retail/repair checkout). */
+function paymentBreakdownFromMethod(method, amount) {
+    const payments = { cash: 0, card: 0, credit: 0, bank: 0, split: 0 };
+    const m = String(method || 'cash').toLowerCase();
+    const amt = round2(Number(amount) || 0);
+    if (m === 'cash') payments.cash = amt;
+    else if (m === 'card') payments.card = amt;
+    else if (m === 'bank') payments.bank = amt;
+    else if (m === 'credit') payments.credit = amt;
+    return payments;
+}
+
 module.exports = {
     round2,
     normalizePaymentBreakdown,
     computeWholesaleTotalOwing,
     computeWholesalePaidNow,
-    computeRemainingAmountDue
+    computeRemainingAmountDue,
+    paymentBreakdownFromMethod
 };
