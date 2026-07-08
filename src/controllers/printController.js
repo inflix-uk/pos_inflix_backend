@@ -8,7 +8,7 @@ const activityLogService = require('../services/activityLogService');
 const { buildReceiptEscpos } = require('../utils/escposReceipt');
 const { qrTextToEscposRaster } = require('../utils/escposGraphics');
 const { mergeReceiptPrinterSalesPrint } = require('../utils/receiptPrinterPrintOptions');
-const { variantAttributeSlugsOrderBySkuForSale } = require('../utils/printVariantAttributes');
+const { printMapsForSale } = require('../utils/printVariantAttributes');
 const { resolveLocationForPrint, getLocationPostalBlock } = require('../utils/printLocationHelper');
 const { enrichSaleWithCustomerContact } = require('../utils/enrichSaleForPrint');
 
@@ -68,8 +68,11 @@ exports.getReceiptEscpos = asyncHandler(async (req, res) => {
         qrEscpos
     };
 
-    const variantMap = await variantAttributeSlugsOrderBySkuForSale(sale, getTenantIdFromReq(req));
-    const buffer = buildReceiptEscpos(sale, settings, variantMap);
+    const { variantAttributeSlugsOrderBySku, categoryNameBySku } = await printMapsForSale(
+        sale,
+        getTenantIdFromReq(req)
+    );
+    const buffer = buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku, categoryNameBySku);
     const dataBase64 = buffer.toString('base64');
     const jobName = `receipt-${(sale.reference || sale._id).toString()}`;
 
@@ -105,7 +108,7 @@ exports.getSalePrintContext = asyncHandler(async (req, res) => {
     sale = await enrichSaleWithCustomerContact(sale);
     const { location, fallbackLabel } = await resolveLocationForPrint(sale.locationId || null);
 
-    const variantAttributeSlugsOrderBySku = await variantAttributeSlugsOrderBySkuForSale(sale, tenantId);
+    const { variantAttributeSlugsOrderBySku, categoryNameBySku } = await printMapsForSale(sale, tenantId);
 
     res.status(200).json({
         success: true,
@@ -113,7 +116,8 @@ exports.getSalePrintContext = asyncHandler(async (req, res) => {
             sale,
             location: location || null,
             fallbackLabel: fallbackLabel || null,
-            variantAttributeSlugsOrderBySku
+            variantAttributeSlugsOrderBySku,
+            categoryNameBySku
         }
     });
 });
