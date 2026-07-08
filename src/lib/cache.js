@@ -21,6 +21,7 @@ const REDIS_URL = process.env.REDIS_URL;
 const DEFAULT_TENANT = process.env.TENANT_ID || 'default';
 
 let client = null;
+let redisUnavailable = false;
 let memoryStore = null;
 
 function getMemory() {
@@ -53,14 +54,23 @@ function getMemory() {
 }
 
 async function getClient() {
+    if (redisUnavailable) return null;
     if (client) return client;
     if (!REDIS_URL) return null;
     try {
         const Redis = require('ioredis');
-        client = new Redis(REDIS_URL, { maxRetriesPerRequest: 2, lazyConnect: true });
-        await client.connect();
+        const c = new Redis(REDIS_URL, {
+            maxRetriesPerRequest: 1,
+            lazyConnect: true,
+            connectTimeout: 5000,
+            commandTimeout: 5000,
+        });
+        await c.connect();
+        client = c;
         return client;
     } catch (e) {
+        redisUnavailable = true;
+        client = null;
         console.warn('[cache] Redis connect failed; using memory fallback:', e.message);
         return null;
     }

@@ -503,12 +503,10 @@ exports.getSales = asyncHandler(async (req, res) => {
     if (!searchStr && !includeItems) {
         salesQuery.select('-items');
     }
-    salesQuery.lean();
-
     // Run count + find in parallel
     const [total, sales] = await Promise.all([
         Sale.countDocuments(query),
-        salesQuery
+        salesQuery.lean().exec()
     ]);
 
     // Fetch return status in parallel for the page's sales (not sequentially after)
