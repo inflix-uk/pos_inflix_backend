@@ -6,11 +6,14 @@ const Sale = require('../models/Sale');
 const SalesReturn = require('../models/SalesReturn');
 const BankAccount = require('../models/BankAccount');
 const Expense = require('../models/Expense');
+const Location = require('../models/Location');
+const mongoose = require('mongoose');
 const asyncHandler = require('../middleware/asyncHandler');
 const auditService = require('../services/auditService');
 const activityLogService = require('../services/activityLogService');
 const redis = require('../lib/redis');
 const { getTenantIdFromReq } = require('../middleware/auth');
+const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const { formatSupplierLabel } = require('../utils/supplierDisplay');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
@@ -794,8 +797,26 @@ exports.getTrialBalance = asyncHandler(async (req, res) => {
 exports.getProfitAndLoss = asyncHandler(async (req, res) => {
     const from = req.query.from ? new Date(req.query.from) : new Date(new Date().getFullYear(), 0, 1);
     const to = req.query.to ? new Date(req.query.to) : new Date();
+    const tid = getTenantIdFromReq(req);
+    const locationIdParam = (req.query.locationId || 'all').trim().toLowerCase();
+    const userScope = getUserLocationScope(req.user);
+
+    if (userScope && userScope.length > 0) {
+        if (!locationIdParam || locationIdParam === 'all') {
+            return res.status(400).json({
+                success: false,
+                message: 'locationId is required for users assigned to specific locations',
+            });
+        }
+        if (!userScope.some((id) => id === locationIdParam)) {
+            return res.status(403).json({ success: false, message: 'Not allowed to view this location' });
+        }
+    } else if (locationIdParam !== 'all' && locationIdParam) {
+        // Admin / unrestricted user with a specific location — no extra scope check.
+    }
 
     const saleDateMatch = {
+        tenantId: tid,
         $and: [
             { status: { $ne: 'voided' } },
             {
@@ -807,11 +828,24 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
         ]
     };
     const returnDateMatch = {
+        tenantId: tid,
         $or: [
             { occurredAt: { $gte: from, $lte: to } },
             { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { date: { $gte: from, $lte: to } }] },
             { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { date: { $exists: false } }, { createdAt: { $gte: from, $lte: to } }] }
         ]
+    };
+
+    if (locationIdParam !== 'all' && locationIdParam) {
+        const locationObjectId = new mongoose.Types.ObjectId(locationIdParam);
+        saleDateMatch.locationId = locationObjectId;
+        returnDateMatch.locationId = locationObjectId;
+    }
+
+    const expenseDateMatch = {
+        tenantId: tid,
+        status: { $in: ['Approved', 'Paid'] },
+        occurredAtUtc: { $gte: from, $lte: to },
     };
 
     const [
@@ -891,21 +925,11 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
             }
         ]),
         Expense.aggregate([
-            {
-                $match: {
-                    status: { $in: ['Approved', 'Paid'] },
-                    occurredAtUtc: { $gte: from, $lte: to }
-                }
-            },
+            { $match: expenseDateMatch },
             { $group: { _id: null, total: { $sum: '$amountGross' } } }
         ]),
         Expense.aggregate([
-            {
-                $match: {
-                    status: { $in: ['Approved', 'Paid'] },
-                    occurredAtUtc: { $gte: from, $lte: to }
-                }
-            },
+            { $match: expenseDateMatch },
             { $group: { _id: '$categoryId', totalGross: { $sum: '$amountGross' }, count: { $sum: 1 } } },
             { $lookup: { from: 'expense_categories', localField: '_id', foreignField: '_id', as: 'cat' } },
             { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
@@ -976,11 +1000,18 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
     const missingCostLineCount = (missingCostLinesResult && missingCostLinesResult[0] && missingCostLinesResult[0].count) || 0;
     const missingCostSaleCount = (missingCostSalesResult && missingCostSalesResult[0] && missingCostSalesResult[0].count) || 0;
 
+    let location = { locationId: 'all', name: 'All locations' };
+    if (locationIdParam !== 'all' && locationIdParam) {
+        const loc = await Location.findById(locationIdParam).select('name').lean();
+        location = { locationId: locationIdParam, name: loc?.name || 'Unknown' };
+    }
+
     res.status(200).json({
         success: true,
         data: {
             from,
             to,
+            location,
             revenue,
             salesRevenue,
             returnRevenue,
