@@ -6,6 +6,7 @@ const REDIS_URL = process.env.REDIS_URL;
 const TENANT_ID = process.env.TENANT_ID || 'default';
 
 let client = null;
+let redisUnavailable = false;
 let memoryFallback = null;
 
 function getMemoryFallback() {
@@ -36,14 +37,23 @@ function getMemoryFallback() {
 }
 
 async function getClient() {
+    if (redisUnavailable) return null;
     if (client) return client;
     if (!REDIS_URL || REDIS_URL === '') return null;
     try {
         const Redis = require('ioredis');
-        client = new Redis(REDIS_URL, { maxRetriesPerRequest: 2, lazyConnect: true });
-        await client.connect();
+        const c = new Redis(REDIS_URL, {
+            maxRetriesPerRequest: 1,
+            lazyConnect: true,
+            connectTimeout: 5000,
+            commandTimeout: 5000,
+        });
+        await c.connect();
+        client = c;
         return client;
     } catch (e) {
+        redisUnavailable = true;
+        client = null;
         console.warn('Redis connect failed, using in-memory fallback:', e.message);
         return null;
     }
@@ -65,8 +75,12 @@ async function get(tenantId, serial) {
         try {
             const raw = await c.get(key);
             return raw ? JSON.parse(raw) : null;
-        } catch {
-            return null;
+        } catch (e) {
+            if (e && (e.message || '').includes('timed out')) {
+                redisUnavailable = true;
+                client = null;
+            }
+            return getMemoryFallback().get(key);
         }
     }
     return getMemoryFallback().get(key);
@@ -105,7 +119,11 @@ async function mget(tenantId, serials) {
         try {
             const raw = await c.mget(...keys);
             return raw.map((r) => (r ? JSON.parse(r) : null));
-        } catch {
+        } catch (e) {
+            if (e && (e.message || '').includes('timed out')) {
+                redisUnavailable = true;
+                client = null;
+            }
             return getMemoryFallback().mget(keys);
         }
     }
@@ -155,7 +173,11 @@ async function getDashboardCache(keySuffix) {
         const key = DASHBOARD_CACHE_PREFIX + (keySuffix || '') + ':v' + version;
         const raw = await c.get(key);
         return raw ? JSON.parse(raw) : null;
-    } catch {
+    } catch (e) {
+        if (e && (e.message || '').includes('timed out')) {
+            redisUnavailable = true;
+            client = null;
+        }
         return null;
     }
 }
@@ -167,7 +189,12 @@ async function setDashboardCache(keySuffix, value) {
         const version = await getDashboardCacheVersion();
         const key = DASHBOARD_CACHE_PREFIX + (keySuffix || '') + ':v' + version;
         await c.setex(key, DASHBOARD_CACHE_TTL, JSON.stringify(value));
-    } catch (_) {}
+    } catch (e) {
+        if (e && (e.message || '').includes('timed out')) {
+            redisUnavailable = true;
+            client = null;
+        }
+    }
 }
 
 async function invalidateDashboardCache(keySuffixOrPattern) {

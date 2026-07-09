@@ -6,7 +6,7 @@
 
 const mongoose = require('mongoose');
 const { getLondonDateKey } = require('../utils/dateKey');
-const { canViewHistoricalSales, getTodayLondonBounds } = require('../utils/salesDateAccess');
+const { canViewHistoricalSales, getTodayLondonBounds, getLondonDateUtcBounds } = require('../utils/salesDateAccess');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const LocationDailyMetric = require('../models/LocationDailyMetric');
@@ -20,6 +20,11 @@ const asyncHandler = require('../middleware/asyncHandler');
 const redis = require('../lib/redis');
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
+const AGG_MAX_TIME_MS = 25000;
+
+function agg(pipeline, model) {
+  return model.aggregate(pipeline).option({ maxTimeMS: AGG_MAX_TIME_MS });
+}
 
 /** Map ledger method groups into cash/card/bank/credit (transfer → bank; refund → cash). */
 function mergeLedgerRowsToBuckets(rows) {
@@ -99,36 +104,52 @@ const returnLondonDateKey = {
 
 /** Match sale/return activity between UTC instants (shift Z-Read). */
 function occurredBetweenUtc(fromUtc, toUtc) {
-  return {
-    $expr: {
-      $and: [
-        { $gte: [{ $ifNull: ['$occurredAt', '$createdAt'] }, fromUtc] },
-        { $lte: [{ $ifNull: ['$occurredAt', '$createdAt'] }, toUtc] },
-      ],
-    },
-  };
+  return saleEventTimeBetweenUtc(fromUtc, toUtc);
 }
 
 function voidedBetweenUtc(fromUtc, toUtc) {
-  return {
-    $expr: {
-      $and: [
-        { $gte: [{ $ifNull: ['$voidedAtUtc', '$createdAt'] }, fromUtc] },
-        { $lte: [{ $ifNull: ['$voidedAtUtc', '$createdAt'] }, toUtc] },
-      ],
-    },
-  };
+  return voidEventTimeBetweenUtc(fromUtc, toUtc);
 }
 
 function returnOccurredBetweenUtc(fromUtc, toUtc) {
   return {
-    $expr: {
-      $and: [
-        { $gte: [{ $ifNull: ['$occurredAt', { $ifNull: ['$date', '$createdAt'] }] }, fromUtc] },
-        { $lte: [{ $ifNull: ['$occurredAt', { $ifNull: ['$date', '$createdAt'] }] }, toUtc] },
-      ],
-    },
+    $or: [
+      { occurredAt: { $gte: fromUtc, $lte: toUtc } },
+      { occurredAt: null, date: { $gte: fromUtc, $lte: toUtc } },
+      { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { date: null }, { createdAt: { $gte: fromUtc, $lte: toUtc } }] },
+    ],
   };
+}
+
+/** Index-friendly sale activity window (occurredAt when set, else createdAt). */
+function saleEventTimeBetweenUtc(fromUtc, toUtc) {
+  return {
+    $or: [
+      { occurredAt: { $gte: fromUtc, $lte: toUtc } },
+      { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { createdAt: { $gte: fromUtc, $lte: toUtc } }] },
+    ],
+  };
+}
+
+function voidEventTimeBetweenUtc(fromUtc, toUtc) {
+  return {
+    $or: [
+      { voidedAtUtc: { $gte: fromUtc, $lte: toUtc } },
+      { $and: [{ $or: [{ voidedAtUtc: null }, { voidedAtUtc: { $exists: false } }] }, { createdAt: { $gte: fromUtc, $lte: toUtc } }] },
+    ],
+  };
+}
+
+/** Combine location scope $or with a time constraint without clobbering either. */
+function applyTimeConstraint(match, timeConstraint) {
+  if (!timeConstraint) return;
+  const locationOr = match.$or;
+  if (!locationOr) {
+    Object.assign(match, timeConstraint);
+    return;
+  }
+  delete match.$or;
+  match.$and = [{ $or: locationOr }, timeConstraint];
 }
 
 /**
@@ -142,6 +163,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
   const fromUtcParam = (req.query.fromUtc || '').trim();
   const toUtcParam = (req.query.toUtc || '').trim();
   const locationIdParam = (req.query.locationId || 'all').trim().toLowerCase();
+  const lite = req.query.lite === '1' || req.query.lite === 'true';
   const tid = getTenantIdFromReq(req);
   const userScope = getUserLocationScope(req.user);
 
@@ -178,14 +200,19 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
 
   const scopeKey = (userScope && userScope.length) ? userScope.sort().join(',') : 'all';
   const cacheKeySuffix = useUtcRange
-    ? `takingsdash:shift:v1:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}`
-    : `takingsdash:v3:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}`;
+    ? `takingsdash:shift:v1:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`
+    : `takingsdash:v4:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`;
   if (!useUtcRange) {
     const cached = await redis.getDashboardCache(cacheKeySuffix);
     if (cached) {
       return res.json({ success: true, data: cached, cached: true });
     }
   }
+
+  const dayUtcBounds = !useUtcRange ? getLondonDateUtcBounds(from, to) : null;
+  const rangeFromUtc = useUtcRange ? fromUtc : dayUtcBounds.fromUtc;
+  const rangeToUtc = useUtcRange ? toUtc : dayUtcBounds.toUtc;
+  const useIndexedTimeRange = !!(rangeFromUtc && rangeToUtc);
 
   const locationMatch = { tenantId: tid };
   if (locationIdParam !== 'all' && locationIdParam) {
@@ -198,65 +225,125 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
   }
 
   const saleMatch = { tenantId: tid, status: { $ne: 'voided' } };
-  if (!useUtcRange) saleMatch.londonDateKey = { $gte: from, $lte: to };
+  if (!useIndexedTimeRange) saleMatch.londonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) saleMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) saleMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
-  if (useUtcRange) Object.assign(saleMatch, occurredBetweenUtc(fromUtc, toUtc));
+  if (useUtcRange) applyTimeConstraint(saleMatch, occurredBetweenUtc(fromUtc, toUtc));
+  else if (useIndexedTimeRange) applyTimeConstraint(saleMatch, saleEventTimeBetweenUtc(rangeFromUtc, rangeToUtc));
 
   const voidMatch = { tenantId: tid, status: 'voided' };
-  if (!useUtcRange) voidMatch.voidLondonDateKey = { $gte: from, $lte: to };
+  if (!useIndexedTimeRange) voidMatch.voidLondonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) voidMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) voidMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
-  if (useUtcRange) Object.assign(voidMatch, voidedBetweenUtc(fromUtc, toUtc));
+  if (useUtcRange) applyTimeConstraint(voidMatch, voidedBetweenUtc(fromUtc, toUtc));
+  else if (useIndexedTimeRange) applyTimeConstraint(voidMatch, voidEventTimeBetweenUtc(rangeFromUtc, rangeToUtc));
 
   const returnMatch = { tenantId: tid };
-  if (!useUtcRange) returnMatch.returnLondonDateKey = { $gte: from, $lte: to };
+  if (!useIndexedTimeRange) returnMatch.returnLondonDateKey = { $gte: from, $lte: to };
   if (locationIdParam !== 'all' && locationIdParam) returnMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) returnMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
-  if (useUtcRange) Object.assign(returnMatch, returnOccurredBetweenUtc(fromUtc, toUtc));
+  if (useUtcRange) applyTimeConstraint(returnMatch, returnOccurredBetweenUtc(fromUtc, toUtc));
+  else if (useIndexedTimeRange) applyTimeConstraint(returnMatch, returnOccurredBetweenUtc(rangeFromUtc, rangeToUtc));
 
   const ledgerDateMatch = { tenantId: tid };
-  if (!useUtcRange) ledgerDateMatch.ledgerLondonDateKey = { $gte: from, $lte: to };
-  else {
-    ledgerDateMatch.occurredAtUtc = { $gte: fromUtc, $lte: toUtc };
-  }
+  if (!useIndexedTimeRange) ledgerDateMatch.ledgerLondonDateKey = { $gte: from, $lte: to };
+  else ledgerDateMatch.occurredAtUtc = { $gte: rangeFromUtc, $lte: rangeToUtc };
   if (locationIdParam !== 'all' && locationIdParam) ledgerDateMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
   else if (userScope && userScope.length > 0) ledgerDateMatch.$or = [{ locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } }, { locationId: null }];
+
+  const fastTimeMatch = useUtcRange || useIndexedTimeRange;
+  const expenseUtcRange = fastTimeMatch
+    ? { $gte: rangeFromUtc, $lte: rangeToUtc }
+    : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') };
+
+  const salePaymentPipeline = (fastTimeMatch
+    ? [{ $match: saleMatch }]
+    : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
+  ).concat([
+    {
+      $project: {
+        isWholesale: { $eq: ['$type', 'wholesale'] },
+        payCash: { $ifNull: ['$payments.cash', 0] },
+        payCard: { $ifNull: ['$payments.card', 0] },
+        payBank: { $ifNull: ['$payments.bank', 0] },
+        payCredit: { $ifNull: ['$payments.credit', 0] },
+        total: '$total',
+        pm: { $ifNull: ['$paymentMethod', 'cash'] },
+      },
+    },
+    {
+      $project: {
+        cashIn: {
+          $cond: [
+            '$isWholesale',
+            '$payCash',
+            { $cond: [{ $eq: ['$pm', 'cash'] }, '$total', 0] },
+          ],
+        },
+        cardIn: {
+          $cond: [
+            '$isWholesale',
+            '$payCard',
+            { $cond: [{ $eq: ['$pm', 'card'] }, '$total', 0] },
+          ],
+        },
+        bankIn: {
+          $cond: [
+            '$isWholesale',
+            '$payBank',
+            { $cond: [{ $eq: ['$pm', 'bank'] }, '$total', 0] },
+          ],
+        },
+        creditIn: {
+          $cond: [
+            '$isWholesale',
+            '$payCredit',
+            { $cond: [{ $eq: ['$pm', 'credit'] }, '$total', 0] },
+          ],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        cashIn: { $sum: '$cashIn' },
+        cardIn: { $sum: '$cardIn' },
+        bankIn: { $sum: '$bankIn' },
+        creditIn: { $sum: '$creditIn' },
+      },
+    },
+  ]);
+
+  const metricsPromise = (() => {
+    if (useUtcRange) return Promise.resolve([]);
+    if (locationIdParam === 'all' || !locationIdParam) {
+      if (userScope && userScope.length > 0) {
+        return agg([
+          { $match: { tenantId: tid, locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) }, dateKey: { $gte: from, $lte: to } } },
+          { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
+        ], LocationDailyMetric);
+      }
+      return agg([
+        { $match: { tenantId: tid, dateKey: { $gte: from, $lte: to } } },
+        { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
+      ], TenantDailyMetric);
+    }
+    return agg([
+      { $match: { tenantId: tid, locationId: new mongoose.Types.ObjectId(locationIdParam), dateKey: { $gte: from, $lte: to } } },
+      { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
+    ], LocationDailyMetric);
+  })();
 
   const [
     metricsRow,
     ledgerPaymentByMethod,
     ledgerAccountByAccount,
     voidsAgg,
-    revenueAgg,
-    cogsAgg,
-    returnRevAgg,
-    returnCogsAgg,
-    expenseTotalAgg,
-    expenseByCatAgg,
     salePaymentInFromSales,
   ] = await Promise.all([
-    (() => {
-      if (useUtcRange) return Promise.resolve([]);
-      if (locationIdParam === 'all' || !locationIdParam) {
-        if (userScope && userScope.length > 0) {
-          return LocationDailyMetric.aggregate([
-            { $match: { tenantId: tid, locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) }, dateKey: { $gte: from, $lte: to } } },
-            { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-          ]);
-        }
-        return TenantDailyMetric.aggregate([
-          { $match: { tenantId: tid, dateKey: { $gte: from, $lte: to } } },
-          { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-        ]);
-      }
-      return LocationDailyMetric.aggregate([
-        { $match: { tenantId: tid, locationId: new mongoose.Types.ObjectId(locationIdParam), dateKey: { $gte: from, $lte: to } } },
-        { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-      ]);
-    })(),
-    PaymentLedgerEntry.aggregate(
-      useUtcRange
+    metricsPromise,
+    agg(
+      fastTimeMatch
         ? [{ $match: ledgerDateMatch }, {
           $group: {
             _id: '$method',
@@ -274,9 +361,9 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
           out: { $sum: { $cond: [{ $eq: ['$direction', 'out'] }, '$amount', 0] } }
         }
       }
-    ]),
-    PaymentLedgerEntry.aggregate(
-      useUtcRange
+    ], PaymentLedgerEntry),
+    agg(
+      fastTimeMatch
         ? [{ $match: ledgerDateMatch }, {
           $group: {
             _id: '$accountId',
@@ -300,136 +387,99 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
       { $lookup: { from: 'payment_accounts', localField: '_id', foreignField: '_id', as: 'account' } },
       { $unwind: { path: '$account', preserveNullAndEmptyArrays: true } },
       { $project: { accountId: '$_id', accountName: '$account.name', type: '$account.type', in: 1, out: 1, net: { $subtract: ['$in', '$out'] } } }
-    ]),
-    Sale.aggregate(
-      useUtcRange
+    ], PaymentLedgerEntry),
+    agg(
+      fastTimeMatch
         ? [{ $match: voidMatch }, { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$total' } } }]
         : [
       { $addFields: { voidLondonDateKey: { $dateToString: { date: { $ifNull: ['$voidedAtUtc', '$createdAt'] }, format: '%Y-%m-%d', timezone: 'Europe/London' } } } },
       { $match: voidMatch },
       { $group: { _id: null, count: { $sum: 1 }, total: { $sum: '$total' } } }
-    ]),
-    Sale.aggregate(
-      useUtcRange
+    ], Sale),
+    agg(salePaymentPipeline, Sale),
+  ]);
+
+  const hasDailyMetrics = !!(metricsRow && metricsRow[0]);
+  const skipRevenueAggs = !useUtcRange && hasDailyMetrics;
+
+  const [
+    revenueAgg,
+    cogsAgg,
+    returnRevAgg,
+    returnCogsAgg,
+    expenseTotalAgg,
+    expenseByCatAgg,
+  ] = await Promise.all([
+    skipRevenueAggs
+      ? Promise.resolve([])
+      : agg(
+      fastTimeMatch
         ? [{ $match: saleMatch }, { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }]
         : [
       { $addFields: { londonDateKey: saleLondonDateKey } },
       { $match: saleMatch },
       { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } },
-    ]),
-    Sale.aggregate(
-      useUtcRange
+    ], Sale),
+    lite
+      ? Promise.resolve([])
+      : agg(
+      fastTimeMatch
         ? [{ $match: saleMatch }, { $unwind: '$items' }, { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_sale', 0] }] } } } }]
         : [
       { $addFields: { londonDateKey: saleLondonDateKey } },
       { $match: saleMatch },
       { $unwind: '$items' },
       { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_sale', 0] }] } } } },
-    ]),
-    SalesReturn.aggregate(
-      useUtcRange
+    ], Sale),
+    skipRevenueAggs
+      ? Promise.resolve([])
+      : agg(
+      fastTimeMatch
         ? [{ $match: returnMatch }, { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } }]
         : [
       { $addFields: { returnLondonDateKey: returnLondonDateKey } },
       { $match: returnMatch },
       { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } },
-    ]),
-    SalesReturn.aggregate(
-      useUtcRange
+    ], SalesReturn),
+    lite
+      ? Promise.resolve([])
+      : agg(
+      fastTimeMatch
         ? [{ $match: returnMatch }, { $unwind: '$items' }, { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_return', 0] }] } } } }]
         : [
       { $addFields: { returnLondonDateKey: returnLondonDateKey } },
       { $match: returnMatch },
       { $unwind: '$items' },
       { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_return', 0] }] } } } },
-    ]),
-    Expense.aggregate([
+    ], SalesReturn),
+    lite
+      ? Promise.resolve([])
+      : agg([
       { $match: {
         tenantId: tid,
         status: { $in: ['Approved', 'Paid'] },
-        occurredAtUtc: useUtcRange
-          ? { $gte: fromUtc, $lte: toUtc }
-          : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') },
+        occurredAtUtc: expenseUtcRange,
       } },
       { $group: { _id: null, total: { $sum: '$amountGross' } } }
-    ]),
-    Expense.aggregate([
+    ], Expense),
+    lite
+      ? Promise.resolve([])
+      : agg([
       { $match: {
         tenantId: tid,
         status: { $in: ['Approved', 'Paid'] },
-        occurredAtUtc: useUtcRange
-          ? { $gte: fromUtc, $lte: toUtc }
-          : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') },
+        occurredAtUtc: expenseUtcRange,
       } },
       { $group: { _id: '$categoryId', totalGross: { $sum: '$amountGross' }, count: { $sum: 1 } } },
       { $lookup: { from: 'expense_categories', localField: '_id', foreignField: '_id', as: 'cat' } },
       { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
       { $project: { categoryName: '$cat.name', totalGross: 1, count: 1, _id: 1 } },
       { $sort: { totalGross: -1 } },
-    ]),
-    Sale.aggregate(
-      (useUtcRange
-        ? [{ $match: saleMatch }]
-        : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
-      ).concat([
-      {
-        $project: {
-          isWholesale: { $eq: ['$type', 'wholesale'] },
-          payCash: { $ifNull: ['$payments.cash', 0] },
-          payCard: { $ifNull: ['$payments.card', 0] },
-          payBank: { $ifNull: ['$payments.bank', 0] },
-          payCredit: { $ifNull: ['$payments.credit', 0] },
-          total: '$total',
-          pm: { $ifNull: ['$paymentMethod', 'cash'] },
-        },
-      },
-      {
-        $project: {
-          cashIn: {
-            $cond: [
-              '$isWholesale',
-              '$payCash',
-              { $cond: [{ $eq: ['$pm', 'cash'] }, '$total', 0] },
-            ],
-          },
-          cardIn: {
-            $cond: [
-              '$isWholesale',
-              '$payCard',
-              { $cond: [{ $eq: ['$pm', 'card'] }, '$total', 0] },
-            ],
-          },
-          bankIn: {
-            $cond: [
-              '$isWholesale',
-              '$payBank',
-              { $cond: [{ $eq: ['$pm', 'bank'] }, '$total', 0] },
-            ],
-          },
-          creditIn: {
-            $cond: [
-              '$isWholesale',
-              '$payCredit',
-              { $cond: [{ $eq: ['$pm', 'credit'] }, '$total', 0] },
-            ],
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          cashIn: { $sum: '$cashIn' },
-          cardIn: { $sum: '$cardIn' },
-          bankIn: { $sum: '$bankIn' },
-          creditIn: { $sum: '$creditIn' },
-        },
-      },
-    ])),
+    ], Expense),
   ]);
 
   // Daily metrics rollup: when the aggregate returns no row (e.g. not backfilled), we must use
   // Sale/SalesReturn aggregates. Using `0 ?? saleTotal` is wrong because 0 is not nullish.
-  const hasDailyMetrics = !!(metricsRow && metricsRow[0]);
   const m = hasDailyMetrics ? metricsRow[0] : null;
   const grossSales = round2(
     hasDailyMetrics ? Number(m.salesRevenueGross) || 0 : Number(revenueAgg[0]?.total) || 0

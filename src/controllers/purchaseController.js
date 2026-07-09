@@ -277,37 +277,51 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         return res.status(cached.status).json(cached.body);
     }
 
-    // Run the fast index lookup AND the legacy DB lookup in parallel. Previously
-    // they ran sequentially (index first, then legacy as fallback / price reconcile)
-    // which doubled the latency. Legacy carries full variant + current sale price
-    // so it is the source of truth when present; index gives an early "sold/returned" signal.
-    const [{ results: indexResults }, legacyResults] = await Promise.all([
-        serialIndexService.lookupSerials(tenantId, [normalized]),
-        legacyFindInStockSerials([normalized], tenantId),
-    ]);
-    const indexOne = indexResults && indexResults[0];
-    const legacyOne = legacyResults && legacyResults[0];
-
-    // Reconcile: legacy wins for `in_stock` (has full variant + latest price).
-    // Index wins for `already_sold` only if legacy doesn't disagree (legacy may have voided sale).
-    let one = legacyOne || indexOne;
-    if (legacyOne && legacyOne.status === 'in_stock') {
-        one = legacyOne;
-    } else if (indexOne && indexOne.status === 'already_sold' && (!legacyOne || legacyOne.status === 'already_sold' || legacyOne.status === 'not_found')) {
-        one = indexOne;
-    } else if (legacyOne) {
-        one = legacyOne;
-        if (indexOne && indexOne.status !== legacyOne.status) {
-            serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
-        }
-    }
-
     const respond = (status, body) => {
         // Only cache positive/negative-stable answers (skip 4xx errors that depend on transient state)
         if (status === 200 || status === 404) _fisSet(cacheKey, { status, body });
         res.setHeader('Server-Timing', `total;dur=${Date.now() - t0}`);
         return res.status(status).json(body);
     };
+
+    // Index + Redis first (same as batch endpoint). Legacy Purchase scan is expensive;
+    // only run it on index miss, sold reconcile, or when group pricing needs full variant fields.
+    const { results: indexResults } = await serialIndexService.lookupSerials(tenantId, [normalized]);
+    const indexOne = indexResults && indexResults[0];
+
+    if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId) {
+        return respond(200, { success: true, data: indexOne.product });
+    }
+    if (indexOne?.status === 'returned_to_supplier') {
+        return respond(404, { success: false, message: 'Serial was returned to supplier and is not available to sell' });
+    }
+
+    const needsLegacy =
+        !indexOne ||
+        indexOne.status === 'not_found' ||
+        indexOne.status === 'already_sold' ||
+        (indexOne.status === 'in_stock' && !!pricingGroupId);
+
+    let one = indexOne;
+    if (needsLegacy) {
+        const legacyResults = await legacyFindInStockSerials([normalized], tenantId);
+        const legacyOne = legacyResults && legacyResults[0];
+        // Reconcile: legacy wins for `in_stock` (full variant + latest sale price).
+        // Index wins for `already_sold` when legacy agrees (voided sale may flip to in_stock).
+        if (legacyOne && legacyOne.status === 'in_stock') {
+            one = legacyOne;
+            if (indexOne && indexOne.status !== legacyOne.status) {
+                serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
+            }
+        } else if (indexOne && indexOne.status === 'already_sold' && (!legacyOne || legacyOne.status === 'already_sold' || legacyOne.status === 'not_found')) {
+            one = indexOne;
+        } else if (legacyOne) {
+            one = legacyOne;
+            if (indexOne && indexOne.status !== legacyOne.status) {
+                serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
+            }
+        }
+    }
 
     if (one) {
         if (one.status === 'in_stock' && one.product) {

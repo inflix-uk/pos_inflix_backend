@@ -36,6 +36,20 @@ function getTodayLondonBounds() {
   };
 }
 
+/** UTC instants for London calendar date keys (YYYY-MM-DD), inclusive end of day. */
+function getLondonDateUtcBounds(fromDateKey, toDateKey) {
+  const [fy, fm, fd] = String(fromDateKey || '').split('-').map(Number);
+  const [ty, tm, td] = String(toDateKey || fromDateKey || '').split('-').map(Number);
+  if (!fy || !fm || !fd) {
+    const b = getTodayLondonBounds();
+    return { fromUtc: b.fromUtc, toUtc: b.toUtc };
+  }
+  return {
+    fromUtc: startOfDayLondonUTC(fy, fm, fd),
+    toUtc: endOfDayLondonUTC(ty || fy, tm || fm, td || fd),
+  };
+}
+
 function canViewHistoricalSales(user) {
   return can(user, 'report.view');
 }
@@ -83,6 +97,7 @@ function assertSaleViewableByUser(user, sale) {
 module.exports = {
   canViewHistoricalSales,
   getTodayLondonBounds,
+  getLondonDateUtcBounds,
   applySalesDateRestriction,
   isWithinTodayLondon,
   assertSaleViewableByUser,
