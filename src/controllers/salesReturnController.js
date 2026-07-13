@@ -239,12 +239,10 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'At least one item is required' });
     }
     if (body.returnType === 'refund') {
-        if (!body.refundAccountId) {
-            return res.status(400).json({ success: false, message: 'Refund requires a payment account (refundAccountId) to deduct from' });
-        }
         if (!body.refundMethod || !['cash', 'card', 'bank'].includes(body.refundMethod)) {
             return res.status(400).json({ success: false, message: 'Refund requires refundMethod: cash, card, or bank' });
         }
+        // Payment account pot is optional for all refund methods (cash / card / bank).
     }
 
     const auditCtx = activityLogService.contextFromReq(req);
