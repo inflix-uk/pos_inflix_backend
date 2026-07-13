@@ -11,6 +11,7 @@ const salesTransactionService = require('../services/salesTransactionService');
 const activityLogService = require('../services/activityLogService');
 const purchaseReturnService = require('../services/purchaseReturnService');
 const serialIndexService = require('../services/serialIndexService');
+const stockItemService = require('../services/stockItemService');
 const metricsService = require('../services/metricsService');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
@@ -300,11 +301,32 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
       doc.occurredAt || doc.createdAt
     ).catch(() => {});
 
+    const restockSerials = [];
     for (const it of doc.items || []) {
         const serials = Array.isArray(it.serialNumbers) ? it.serialNumbers.filter(Boolean) : [];
-        const status = it.returnDestination === 'return_to_supplier' ? 'returned_to_supplier' : 'in_stock';
-        for (const serial of serials) {
-            serialIndexService.upsertSerialIndex(tenantId, { serial, status }).catch(() => {});
+        if (it.returnDestination === 'restock') {
+            restockSerials.push(...serials);
+        } else if (it.returnDestination === 'return_to_supplier') {
+            for (const serial of serials) {
+                serialIndexService.upsertSerialIndex(tenantId, { serial, status: 'returned_to_supplier' }).catch(() => {});
+            }
+        }
+    }
+    if (restockSerials.length > 0) {
+        const normalized = [...new Set(restockSerials.map((s) => serialIndexService.normalizeSerial(s)).filter(Boolean))];
+        if (normalized.length > 0) {
+            const purchaseCtrl = require('./purchaseController');
+            try {
+                const legacyResults = await purchaseCtrl.legacyFindInStockSerials(normalized, tenantId);
+                for (const r of legacyResults) {
+                    serialIndexService.upsertFromResult(tenantId, r).catch(() => {});
+                }
+            } catch {
+                for (const s of normalized) {
+                    serialIndexService.invalidateSerial(tenantId, s).catch(() => {});
+                }
+            }
+            stockItemService.markInStock(normalized, tenantId).catch(() => {});
         }
     }
 

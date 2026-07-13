@@ -300,7 +300,7 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         !indexOne ||
         indexOne.status === 'not_found' ||
         indexOne.status === 'already_sold' ||
-        (indexOne.status === 'in_stock' && !!pricingGroupId);
+        (indexOne.status === 'in_stock' && (!indexOne.product || !!pricingGroupId));
 
     let one = indexOne;
     if (needsLegacy) {
@@ -310,7 +310,7 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         // Index wins for `already_sold` when legacy agrees (voided sale may flip to in_stock).
         if (legacyOne && legacyOne.status === 'in_stock') {
             one = legacyOne;
-            if (indexOne && indexOne.status !== legacyOne.status) {
+            if (!indexOne || indexOne.status !== legacyOne.status || !indexOne.product) {
                 serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
             }
         } else if (indexOne && indexOne.status === 'already_sold' && (!legacyOne || legacyOne.status === 'already_sold' || legacyOne.status === 'not_found')) {
@@ -532,14 +532,14 @@ exports.getFindInStockSerialsBatch = asyncHandler(async (req, res) => {
 
     const { results, cacheHits, cacheMisses, dbTimeMs, totalTimeMs } = await serialIndexService.lookupSerials(tenantId, toProcess);
 
-    const reconcileSerials = results.filter((r) => r.status === 'not_found' || r.status === 'already_sold').map((r) => r.serial);
+    const reconcileSerials = results.filter((r) => r.status === 'not_found' || r.status === 'already_sold' || (r.status === 'in_stock' && !r.product)).map((r) => r.serial);
     if (reconcileSerials.length > 0) {
         const legacyResults = await legacyFindInStockSerials(reconcileSerials, tenantId);
         const bySerial = {};
         legacyResults.forEach((r) => { bySerial[r.serial] = r; });
         for (let i = 0; i < results.length; i++) {
             const st = results[i].status;
-            if ((st === 'not_found' || st === 'already_sold') && bySerial[results[i].serial]) {
+            if ((st === 'not_found' || st === 'already_sold' || (st === 'in_stock' && !results[i].product)) && bySerial[results[i].serial]) {
                 const leg = bySerial[results[i].serial];
                 results[i] = leg;
                 serialIndexService.upsertFromResult(tenantId, leg).catch(() => {});
