@@ -289,7 +289,12 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
     const { results: indexResults } = await serialIndexService.lookupSerials(tenantId, [normalized]);
     const indexOne = indexResults && indexResults[0];
 
-    if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId) {
+    const isStubIndexProduct = (p) => {
+        const name = String(p?.name || '').trim().toLowerCase();
+        return name === 'product' || (!p?.brand && !p?.grade && !p?.brandModel && !p?.capacity && name.length <= 8);
+    };
+
+    if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId && !isStubIndexProduct(indexOne.product)) {
         return respond(200, { success: true, data: indexOne.product });
     }
     if (indexOne?.status === 'returned_to_supplier') {
@@ -300,7 +305,7 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         !indexOne ||
         indexOne.status === 'not_found' ||
         indexOne.status === 'already_sold' ||
-        (indexOne.status === 'in_stock' && (!indexOne.product || !!pricingGroupId));
+        (indexOne.status === 'in_stock' && (!indexOne.product || isStubIndexProduct(indexOne.product) || !!pricingGroupId));
 
     let one = indexOne;
     if (needsLegacy) {

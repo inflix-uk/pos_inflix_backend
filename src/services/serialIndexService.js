@@ -16,10 +16,10 @@ function indexToApiStatus(status) {
 function indexDocToResult(doc) {
     const status = indexToApiStatus(doc.status);
     const result = { serial: doc.serial, status };
-    if (status === 'in_stock' && (doc.skuSnapshot || doc.productNameSnapshot != null)) {
+    if (status === 'in_stock' && String(doc.productNameSnapshot || '').trim()) {
         result.product = {
             sku: doc.skuSnapshot || '',
-            name: doc.productNameSnapshot || 'Product',
+            name: String(doc.productNameSnapshot).trim(),
             price: Number(doc.salePrice) || 0,
             category: 'Uncategorized',
             brand: '',
