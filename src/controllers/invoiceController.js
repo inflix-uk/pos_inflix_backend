@@ -23,6 +23,7 @@ const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
 const EmailSettings = require('../models/EmailSettings');
 const emailService = require('../lib/emailService');
+const { getLondonDateUtcBounds, applySalesDateRestriction } = require('../utils/salesDateAccess');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -71,6 +72,40 @@ const getInvoices = asyncHandler(async (req, res) => {
             orClause.push({ customerId: { $in: matchedIds } });
         }
         query.$or = orClause;
+    }
+
+    const dateRestriction = applySalesDateRestriction(req.user, {
+        from: req.query.from,
+        to: req.query.to,
+    });
+    let fromUtc;
+    let toUtc;
+    if (dateRestriction.restricted) {
+        fromUtc = dateRestriction.from;
+        toUtc = dateRestriction.to;
+    } else {
+        const fromQ = req.query.from && String(req.query.from).trim();
+        const toQ = req.query.to && String(req.query.to).trim();
+        if (fromQ || toQ) {
+            const bounds = getLondonDateUtcBounds(fromQ, toQ || fromQ);
+            fromUtc = bounds.fromUtc;
+            toUtc = bounds.toUtc;
+        }
+    }
+    if (fromUtc && toUtc) {
+        const dateClause = {
+            $or: [
+                { occurredAt: { $gte: fromUtc, $lte: toUtc } },
+                {
+                    $and: [
+                        { $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] },
+                        { createdAt: { $gte: fromUtc, $lte: toUtc } },
+                    ],
+                },
+            ],
+        };
+        if (!query.$and) query.$and = [];
+        query.$and.push(dateClause);
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
