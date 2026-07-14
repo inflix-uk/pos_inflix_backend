@@ -9,7 +9,24 @@ async function invalidateHeaderQuickActionsCache(tenantId) {
     await cache.bumpNs(HEADER_QUICK_ACTIONS_NS, tenantId);
 }
 
-const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList', 'showSalesOnline'];
+const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList', 'showSalesOnline', 'showNewInvoice'];
+/** Defaults when a field is unset (most on; Invoice off until enabled in settings). */
+const FIELD_DEFAULTS = {
+    showNewSale: true,
+    showNewRepair: true,
+    showParcel: true,
+    showReturn: true,
+    showSalesModeToggle: true,
+    showAccounts: true,
+    showStockList: true,
+    showSalesOnline: true,
+    showNewInvoice: false,
+};
+
+function fieldVisible(settings, f) {
+    if (typeof settings[f] === 'boolean') return settings[f];
+    return FIELD_DEFAULTS[f] !== false;
+}
 
 // @desc    Get header quick actions visibility
 // @route   GET /api/settings/header-quick-actions
@@ -22,7 +39,7 @@ exports.getHeaderQuickActions = asyncHandler(async (req, res) => {
             const settings = await HeaderQuickActionsSettings.getSettings();
             const out = {};
             for (const f of FIELDS) {
-                out[f] = settings[f] !== false;
+                out[f] = fieldVisible(settings, f);
             }
             return out;
         }
@@ -51,7 +68,7 @@ exports.updateHeaderQuickActions = asyncHandler(async (req, res) => {
 
     const data = {};
     for (const f of FIELDS) {
-        data[f] = settings[f] !== false;
+        data[f] = fieldVisible(settings, f);
     }
     res.status(200).json({ success: true, data });
 });
