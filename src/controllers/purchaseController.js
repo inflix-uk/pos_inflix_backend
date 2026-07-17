@@ -293,8 +293,20 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         const name = String(p?.name || '').trim().toLowerCase();
         return name === 'product' || (!p?.brand && !p?.grade && !p?.brandModel && !p?.capacity && name.length <= 8);
     };
+    // Older SerialIndex rows stored name/price only — force legacy once so grade/colour come back.
+    const isIncompleteIndexProduct = (p) => {
+        if (!p || isStubIndexProduct(p)) return true;
+        const hasVariantMeta = Boolean(
+            (p.grade && String(p.grade).trim()) ||
+            (p.colour && String(p.colour).trim()) ||
+            (p.brand && String(p.brand).trim()) ||
+            (p.brandModel && String(p.brandModel).trim()) ||
+            (p.capacity && String(p.capacity).trim())
+        );
+        return !hasVariantMeta;
+    };
 
-    if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId && !isStubIndexProduct(indexOne.product)) {
+    if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId && !isIncompleteIndexProduct(indexOne.product)) {
         return respond(200, { success: true, data: indexOne.product });
     }
     if (indexOne?.status === 'returned_to_supplier') {
@@ -305,7 +317,7 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         !indexOne ||
         indexOne.status === 'not_found' ||
         indexOne.status === 'already_sold' ||
-        (indexOne.status === 'in_stock' && (!indexOne.product || isStubIndexProduct(indexOne.product) || !!pricingGroupId));
+        (indexOne.status === 'in_stock' && (!indexOne.product || isIncompleteIndexProduct(indexOne.product) || !!pricingGroupId));
 
     let one = indexOne;
     if (needsLegacy) {
@@ -315,14 +327,14 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         // Index wins for `already_sold` when legacy agrees (voided sale may flip to in_stock).
         if (legacyOne && legacyOne.status === 'in_stock') {
             one = legacyOne;
-            if (!indexOne || indexOne.status !== legacyOne.status || !indexOne.product) {
+            if (!indexOne || indexOne.status !== legacyOne.status || !indexOne.product || isIncompleteIndexProduct(indexOne.product)) {
                 serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
             }
         } else if (indexOne && indexOne.status === 'already_sold' && (!legacyOne || legacyOne.status === 'already_sold' || legacyOne.status === 'not_found')) {
             one = indexOne;
         } else if (legacyOne) {
             one = legacyOne;
-            if (indexOne && indexOne.status !== legacyOne.status) {
+            if (indexOne && (indexOne.status !== legacyOne.status || isIncompleteIndexProduct(indexOne.product))) {
                 serialIndexService.upsertFromResult(tenantId, legacyOne).catch(() => {});
             }
         }
@@ -537,14 +549,30 @@ exports.getFindInStockSerialsBatch = asyncHandler(async (req, res) => {
 
     const { results, cacheHits, cacheMisses, dbTimeMs, totalTimeMs } = await serialIndexService.lookupSerials(tenantId, toProcess);
 
-    const reconcileSerials = results.filter((r) => r.status === 'not_found' || r.status === 'already_sold' || (r.status === 'in_stock' && !r.product)).map((r) => r.serial);
+    const indexProductIncomplete = (p) => {
+        if (!p) return true;
+        const name = String(p.name || '').trim().toLowerCase();
+        if (name === 'product' || (!p.brand && !p.grade && !p.brandModel && !p.capacity && name.length <= 8)) return true;
+        return !(
+            (p.grade && String(p.grade).trim()) ||
+            (p.colour && String(p.colour).trim()) ||
+            (p.brand && String(p.brand).trim()) ||
+            (p.brandModel && String(p.brandModel).trim()) ||
+            (p.capacity && String(p.capacity).trim())
+        );
+    };
+    const reconcileSerials = results.filter((r) =>
+        r.status === 'not_found' ||
+        r.status === 'already_sold' ||
+        (r.status === 'in_stock' && indexProductIncomplete(r.product))
+    ).map((r) => r.serial);
     if (reconcileSerials.length > 0) {
         const legacyResults = await legacyFindInStockSerials(reconcileSerials, tenantId);
         const bySerial = {};
         legacyResults.forEach((r) => { bySerial[r.serial] = r; });
         for (let i = 0; i < results.length; i++) {
             const st = results[i].status;
-            if ((st === 'not_found' || st === 'already_sold' || (st === 'in_stock' && !results[i].product)) && bySerial[results[i].serial]) {
+            if ((st === 'not_found' || st === 'already_sold' || (st === 'in_stock' && indexProductIncomplete(results[i].product))) && bySerial[results[i].serial]) {
                 const leg = bySerial[results[i].serial];
                 results[i] = leg;
                 serialIndexService.upsertFromResult(tenantId, leg).catch(() => {});
@@ -1710,6 +1738,12 @@ exports.createPurchase = asyncHandler(async (req, res) => {
                     salePrice: Number(it.salePrice) || null,
                     locationId: it.sendTo || null,
                     purchaseDate: purchase.createdAt || purchase.date,
+                    grade: it.grade,
+                    colour: it.colour,
+                    brand: it.brand,
+                    brandModel: it.brandModel,
+                    capacity: it.capacity,
+                    category: (it.category && it.category.name) ? it.category.name : (typeof it.category === 'string' ? it.category : ''),
                 }).catch(() => {});
             }
         }
@@ -1866,6 +1900,12 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
                     salePrice: Number(it.salePrice) || null,
                     locationId: it.sendTo || null,
                     purchaseDate: purchase.createdAt || purchase.date,
+                    grade: it.grade,
+                    colour: it.colour,
+                    brand: it.brand,
+                    brandModel: it.brandModel,
+                    capacity: it.capacity,
+                    category: (it.category && it.category.name) ? it.category.name : (typeof it.category === 'string' ? it.category : ''),
                 }).catch(() => {});
             }
         }
@@ -2054,6 +2094,12 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
             salePrice: Number(item.salePrice) || null,
             locationId: item.sendTo || null,
             purchaseDate: purchase.createdAt || purchase.date,
+            grade: item.grade,
+            colour: item.colour,
+            brand: item.brand,
+            brandModel: item.brandModel,
+            capacity: item.capacity,
+            category: (item.category && item.category.name) ? item.category.name : (typeof item.category === 'string' ? item.category : ''),
         };
         const tenant = tenantId;
         const imeisList = item.imeis;

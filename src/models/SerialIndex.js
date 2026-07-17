@@ -24,6 +24,13 @@ const serialIndexSchema = new mongoose.Schema({
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
     productNameSnapshot: { type: String, default: '' },
     skuSnapshot: { type: String, default: '' },
+    /** Variant snapshots so find-in-stock can show grade/colour without a legacy Purchase scan. */
+    gradeSnapshot: { type: String, default: '' },
+    colourSnapshot: { type: String, default: '' },
+    brandSnapshot: { type: String, default: '' },
+    brandModelSnapshot: { type: String, default: '' },
+    capacitySnapshot: { type: String, default: '' },
+    categorySnapshot: { type: String, default: '' },
     purchaseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Purchase', default: null },
     purchaseItemId: { type: mongoose.Schema.Types.ObjectId, default: null },
     unitCost: { type: Number, default: null },
