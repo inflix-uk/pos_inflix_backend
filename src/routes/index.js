@@ -158,6 +158,7 @@ router.use('/gift-cards', giftCardRoutes);
 router.use('/activity-log', activityLogRoutes);
 router.use('/admin', adminRoutes);
 router.use('/repairs', repairRoutes);
+router.use('/repair-problem-types', require('./repairProblemTypeRoutes'));
 router.use('/dashboard', dashboardRoutes);
 router.use('/expense-categories', expenseCategoryRoutes);
 router.use('/expenses', expenseRoutes);
