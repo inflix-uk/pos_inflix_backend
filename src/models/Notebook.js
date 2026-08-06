@@ -16,6 +16,8 @@ const notebookSchema = new mongoose.Schema({
         enum: NOTEBOOK_COLORS,
         default: 'sky',
     },
+    pinned: { type: Boolean, default: false },
+    pinnedAt: { type: Date, default: null },
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -26,6 +28,7 @@ const notebookSchema = new mongoose.Schema({
     collection: 'notebooks',
 });
 
+notebookSchema.index({ pinned: -1, pinnedAt: -1, name: 1 });
 notebookSchema.index({ name: 1 });
 notebookSchema.index({ updatedAt: -1 });
 

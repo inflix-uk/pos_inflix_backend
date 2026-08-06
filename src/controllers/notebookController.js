@@ -30,6 +30,8 @@ function noteListItem(doc) {
         notebookId: doc.notebookId,
         title: doc.title || 'Untitled',
         color: doc.color || '',
+        pinned: !!doc.pinned,
+        pinnedAt: doc.pinnedAt || null,
         snippet,
         createdAt: doc.createdAt,
         updatedAt: doc.updatedAt,
@@ -40,7 +42,7 @@ function noteListItem(doc) {
 // @route   GET /api/notebooks
 exports.listNotebooks = asyncHandler(async (req, res) => {
     await ensureDefaultNotebook(req.user && req.user._id);
-    const notebooks = await Notebook.find().sort({ name: 1 }).lean();
+    const notebooks = await Notebook.find().sort({ pinned: -1, pinnedAt: -1, name: 1 }).lean();
     const counts = await Note.aggregate([
         { $group: { _id: '$notebookId', count: { $sum: 1 } } },
     ]);
@@ -88,6 +90,10 @@ exports.updateNotebook = asyncHandler(async (req, res) => {
     if (typeof req.body.color === 'string' && req.body.color) {
         notebook.color = req.body.color;
     }
+    if (typeof req.body.pinned === 'boolean') {
+        notebook.pinned = req.body.pinned;
+        notebook.pinnedAt = req.body.pinned ? new Date() : null;
+    }
     await notebook.save();
     const noteCount = await Note.countDocuments({ notebookId: notebook._id });
     res.status(200).json({ success: true, data: { ...notebook.toObject(), noteCount } });
@@ -122,7 +128,7 @@ exports.listNotes = asyncHandler(async (req, res) => {
         const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         filter.$or = [{ title: re }, { bodyHtml: re }];
     }
-    const notes = await Note.find(filter).sort({ updatedAt: -1 }).lean();
+    const notes = await Note.find(filter).sort({ pinned: -1, pinnedAt: -1, updatedAt: -1 }).lean();
     res.status(200).json({ success: true, data: notes.map(noteListItem) });
 });
 
@@ -175,6 +181,10 @@ exports.updateNote = asyncHandler(async (req, res) => {
     }
     if (typeof req.body.color === 'string') {
         note.color = req.body.color;
+    }
+    if (typeof req.body.pinned === 'boolean') {
+        note.pinned = req.body.pinned;
+        note.pinnedAt = req.body.pinned ? new Date() : null;
     }
     if (req.body.notebookId) {
         const target = await Notebook.findById(req.body.notebookId).lean();

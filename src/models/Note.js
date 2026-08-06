@@ -25,6 +25,8 @@ const noteSchema = new mongoose.Schema({
         default: '',
         maxlength: [32, 'Color tag too long'],
     },
+    pinned: { type: Boolean, default: false },
+    pinnedAt: { type: Date, default: null },
     createdBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -40,6 +42,7 @@ const noteSchema = new mongoose.Schema({
     collection: 'notes',
 });
 
+noteSchema.index({ notebookId: 1, pinned: -1, pinnedAt: -1, updatedAt: -1 });
 noteSchema.index({ notebookId: 1, updatedAt: -1 });
 
 module.exports = require('../lib/tenantModel')('Note', noteSchema);
