@@ -99,20 +99,27 @@ exports.updateNotebook = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, data: { ...notebook.toObject(), noteCount } });
 });
 
-// @desc    Delete notebook and its notes
+// @desc    Delete notebook and its notes (allowed even if last; seeds a fresh empty Notes notebook)
 // @route   DELETE /api/notebooks/:id
 exports.deleteNotebook = asyncHandler(async (req, res) => {
     const notebook = await Notebook.findById(req.params.id);
     if (!notebook) {
         return res.status(404).json({ success: false, message: 'Notebook not found' });
     }
-    const remaining = await Notebook.countDocuments({ _id: { $ne: notebook._id } });
-    if (remaining === 0) {
-        return res.status(400).json({ success: false, message: 'Cannot delete the last notebook' });
-    }
     await Note.deleteMany({ notebookId: notebook._id });
     await notebook.deleteOne();
-    res.status(200).json({ success: true, data: { _id: notebook._id } });
+    let seeded = null;
+    const left = await Notebook.countDocuments();
+    if (left === 0) {
+        seeded = await ensureDefaultNotebook(req.user && req.user._id);
+    }
+    res.status(200).json({
+        success: true,
+        data: {
+            _id: notebook._id,
+            seeded: seeded ? { ...seeded.toObject(), noteCount: 0 } : null,
+        },
+    });
 });
 
 // @desc    List notes in a notebook
