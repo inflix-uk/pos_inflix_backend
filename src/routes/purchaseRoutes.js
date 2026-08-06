@@ -10,6 +10,7 @@ const {
     updatePurchaseItemQuantity,
     deletePurchaseItem,
     deletePurchase,
+    restorePurchaseBrandModels,
     getStockList,
     getStockViewRows,
     getFindInStockSerial,
@@ -38,6 +39,7 @@ router.route('/')
 router.patch('/:id/details', updatePurchaseDetails);
 router.patch('/:purchaseId/items/:itemId', requirePermission('purchase.edit'), updatePurchaseItemQuantity);
 router.delete('/:purchaseId/items/:itemId', requirePermission('purchase.edit'), deletePurchaseItem);
+router.post('/:id/restore-brand-models', requirePermission('purchase.edit'), restorePurchaseBrandModels);
 
 router.route('/:id')
     .get(requirePermission('purchase.view'), getPurchase)

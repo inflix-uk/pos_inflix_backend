@@ -2231,6 +2231,99 @@ exports.deletePurchaseItem = asyncHandler(async (req, res) => {
     });
 });
 
+// @desc    Restore missing brandModel on items from audit / serial-index snapshots
+// @route   POST /api/purchases/:id/restore-brand-models
+// @access  Private (purchase.edit)
+exports.restorePurchaseBrandModels = asyncHandler(async (req, res) => {
+    const tenantId = getTenantIdFromReq(req) || 'default';
+    const purchaseId = req.params.id;
+    const purchase = await Purchase.findOne({ _id: purchaseId, tenantId }).select('_id').lean();
+    if (!purchase) {
+        return res.status(404).json({ success: false, message: 'Purchase not found' });
+    }
+
+    const AuditLog = require('../models/AuditLog');
+    const AuditEvent = require('../models/AuditEvent');
+    const SerialIndex = require('../models/SerialIndex');
+    const Sale = require('../models/Sale');
+    const StockItem = require('../models/StockItem');
+    const { restorePurchaseBrandModels } = require('../services/restorePurchaseBrandModels');
+
+    const result = await restorePurchaseBrandModels({
+        Purchase,
+        AuditLog,
+        AuditEvent,
+        SerialIndex,
+        Sale,
+        StockItem,
+        purchaseId,
+        tenantId,
+        apply: true,
+    });
+
+    if (result.restored.length > 0) {
+        await auditService.logFromReq(req, 'Purchase', purchaseId, 'ADJUSTMENT', {
+            restoreReason: 'Restored missing brandModel from audit/serial/sale snapshots',
+            restored: result.restored,
+            skipped: result.skipped,
+        });
+        invalidateForSalesCache(tenantId);
+        exports.invalidateStockPurchasesCache(tenantId);
+        await cache.bumpMany(['purchases:list'], tenantId);
+
+        // Refresh SerialIndex + StockItem so scans / stock list show model again
+        const fresh = await Purchase.findById(purchaseId);
+        if (fresh?.items?.length) {
+            for (const it of fresh.items) {
+                if (!it.brandModel || !Array.isArray(it.imeis)) continue;
+                for (const imei of it.imeis) {
+                    const serial = serialIndexService.normalizeSerial(imei);
+                    if (!serial) continue;
+                    const parts = [it.brand, it.brandModel, it.capacity, it.colour].filter(Boolean);
+                    const name = formatProductName(parts.length > 0 ? parts.join(' ') : 'Product');
+                    serialIndexService.upsertSerialIndex(tenantId, {
+                        serial,
+                        status: 'in_stock',
+                        productNameSnapshot: name,
+                        skuSnapshot: `${fresh._id}-${it._id}`,
+                        purchaseId: fresh._id,
+                        purchaseItemId: it._id,
+                        unitCost: Number(it.purchasePrice) || null,
+                        salePrice: Number(it.salePrice) || null,
+                        locationId: it.sendTo || null,
+                        purchaseDate: fresh.createdAt || fresh.date,
+                        grade: it.grade,
+                        colour: it.colour,
+                        brand: it.brand,
+                        brandModel: it.brandModel,
+                        capacity: it.capacity,
+                    }).catch(() => {});
+                }
+            }
+            stockItemService.rebuildForPurchase(fresh).catch(() => {});
+        }
+    }
+
+    const updated = await Purchase.findOne({ _id: purchaseId, tenantId })
+        .populate('supplier', 'name contactPerson')
+        .populate('account')
+        .populate('createdBy', 'name')
+        .populate('items.sendTo', 'name')
+        .populate('items.tax', 'name rate type')
+        .populate('items.category', 'name')
+        .populate('items.subCategory', 'name');
+
+    res.status(200).json({
+        success: true,
+        message: result.message,
+        data: {
+            purchase: updated ? normalizePurchasesForResponse(updated) : null,
+            restored: result.restored,
+            skipped: result.skipped,
+        },
+    });
+});
+
 // @desc    Get hierarchical stock list (serial items only: category → brand → model → grade → capacity → colour)
 // @route   GET /api/purchases/stock-list
 // @access  Private
