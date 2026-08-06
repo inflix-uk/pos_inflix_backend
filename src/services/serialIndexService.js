@@ -110,7 +110,9 @@ async function lookupSerials(tenantId, serials) {
     let dbTimeMs = 0;
     if (missSerials.length > 0) {
         const tDb = Date.now();
-        const docs = await SerialIndex.find({ tenantId: tenant, serial: { $in: missSerials } }).lean();
+        const docs = await SerialIndex.find({ tenantId: tenant, serial: { $in: missSerials } })
+            .maxTimeMS(8000)
+            .lean();
         dbTimeMs = Date.now() - tDb;
         const bySerial = {};
         docs.forEach((d) => { bySerial[d.serial] = d; });
