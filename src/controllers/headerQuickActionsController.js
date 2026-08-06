@@ -9,7 +9,7 @@ async function invalidateHeaderQuickActionsCache(tenantId) {
     await cache.bumpNs(HEADER_QUICK_ACTIONS_NS, tenantId);
 }
 
-const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList', 'showSalesOnline', 'showNewInvoice'];
+const FIELDS = ['showNewSale', 'showNewRepair', 'showParcel', 'showReturn', 'showSalesModeToggle', 'showAccounts', 'showStockList', 'showSalesOnline', 'showNewInvoice', 'showNotebooks'];
 /** Defaults when a field is unset (most on; Invoice off until enabled in settings). */
 const FIELD_DEFAULTS = {
     showNewSale: true,
@@ -21,6 +21,7 @@ const FIELD_DEFAULTS = {
     showStockList: true,
     showSalesOnline: true,
     showNewInvoice: false,
+    showNotebooks: true,
 };
 
 function fieldVisible(settings, f) {
