@@ -24,6 +24,7 @@ const {
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
 const { normalizePurchaseItems } = require('../utils/normalizePurchaseItems');
 const { formatProductName } = require('../utils/formatProductName');
+const { preservePurchaseItemBrandModels } = require('../utils/preservePurchaseItemBrandModels');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -1857,6 +1858,13 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
         }
         req.body.items = normalizePurchaseItems(req.body.items);
         req.body.items = dedupeOtherItemsByBarcodeKeepingFirst(req.body.items);
+        // Never wipe brandModel on edit when the client sends a blank model for an
+        // existing serial group (name↔id mismatch on purchase edit). Match by IMEI.
+        const preservedModels = preservePurchaseItemBrandModels(
+            req.body.items,
+            beforeSnapshot.items || []
+        );
+        req.body.items = preservedModels.items;
         recomputePurchaseAggregatesFromItems(req.body);
         const uniqueness = await validateUniqueBarcodeAndImei(req.body.items, req.params.id, tenantId);
         if (!uniqueness.valid) {
