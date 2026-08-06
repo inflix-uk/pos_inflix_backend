@@ -503,10 +503,10 @@ exports.getSales = asyncHandler(async (req, res) => {
     if (!searchStr && !includeItems) {
         salesQuery.select('-items');
     }
-    // Run count + find in parallel
+    // Run count + find in parallel (cap query time so a slow Redis/DB cannot hang the Sales page)
     const [total, sales] = await Promise.all([
-        Sale.countDocuments(query),
-        salesQuery.lean().exec()
+        Sale.countDocuments(query).maxTimeMS(12000),
+        salesQuery.maxTimeMS(12000).lean().exec()
     ]);
 
     // Fetch return status in parallel for the page's sales (not sequentially after)

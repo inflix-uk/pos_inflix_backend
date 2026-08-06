@@ -7,21 +7,20 @@
  *   Key shape: pos:{ns}:{tenantId}:v{version}:{paramsHash}
  *   Version key: pos:ver:{ns}:{tenantId}
  *
- * Usage:
- *   await cached({ ns: 'products:list', tenantId, params: { page, limit, search }, ttlSec: 60 }, async () => {
- *     return await Product.find(...).lean();
- *   });
- *
- *   await bumpNs('products:list', tenantId);   // call this on any mutation
+ * If Redis is slow or hangs, we disable it for this process and use memory
+ * so list endpoints (e.g. sales) never sit on skeletons waiting on Redis.
  */
 
 const crypto = require('crypto');
 
 const REDIS_URL = process.env.REDIS_URL;
 const DEFAULT_TENANT = process.env.TENANT_ID || 'default';
+const REDIS_OP_TIMEOUT_MS = Math.max(500, parseInt(process.env.REDIS_OP_TIMEOUT_MS || '2000', 10) || 2000);
+const REDIS_DISABLED_BY_ENV = process.env.CACHE_DISABLE_REDIS === '1' || process.env.CACHE_DISABLE_REDIS === 'true';
 
 let client = null;
-let redisUnavailable = false;
+let redisUnavailable = REDIS_DISABLED_BY_ENV;
+let connecting = null;
 let memoryStore = null;
 
 function getMemory() {
@@ -53,25 +52,77 @@ function getMemory() {
     return memoryStore;
 }
 
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        Promise.resolve(promise),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Redis ${label} timed out after ${ms}ms`)), ms);
+        }),
+    ]).finally(() => {
+        if (timer) clearTimeout(timer);
+    });
+}
+
+function disableRedis(reason) {
+    if (redisUnavailable) return;
+    redisUnavailable = true;
+    console.warn('[cache] Redis disabled for this process; using memory fallback:', reason);
+    try {
+        if (client) {
+            client.disconnect(false);
+        }
+    } catch (_) {}
+    client = null;
+    connecting = null;
+}
+
 async function getClient() {
     if (redisUnavailable) return null;
     if (client) return client;
     if (!REDIS_URL) return null;
+    if (connecting) return connecting;
+
+    connecting = (async () => {
+        try {
+            const Redis = require('ioredis');
+            const c = new Redis(REDIS_URL, {
+                maxRetriesPerRequest: 1,
+                enableOfflineQueue: false,
+                lazyConnect: true,
+                connectTimeout: REDIS_OP_TIMEOUT_MS,
+                commandTimeout: REDIS_OP_TIMEOUT_MS,
+                retryStrategy: () => null,
+            });
+            c.on('error', (err) => {
+                // Avoid unhandled error events; disable on hard failures
+                if (err && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|READONLY/i.test(String(err.message || ''))) {
+                    disableRedis(err.message);
+                }
+            });
+            await withTimeout(c.connect(), REDIS_OP_TIMEOUT_MS, 'connect');
+            // Cheap ping so a half-open Redis does not pass as healthy
+            await withTimeout(c.ping(), REDIS_OP_TIMEOUT_MS, 'ping');
+            client = c;
+            return client;
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            return null;
+        } finally {
+            connecting = null;
+        }
+    })();
+
+    return connecting;
+}
+
+async function redisCall(label, fn) {
+    const c = await getClient();
+    if (!c) return null;
     try {
-        const Redis = require('ioredis');
-        const c = new Redis(REDIS_URL, {
-            maxRetriesPerRequest: 1,
-            lazyConnect: true,
-            connectTimeout: 5000,
-            commandTimeout: 5000,
-        });
-        await c.connect();
-        client = c;
-        return client;
+        return await withTimeout(fn(c), REDIS_OP_TIMEOUT_MS, label);
     } catch (e) {
-        redisUnavailable = true;
-        client = null;
-        console.warn('[cache] Redis connect failed; using memory fallback:', e.message);
+        disableRedis(e.message || String(e));
         return null;
     }
 }
@@ -87,25 +138,19 @@ function hashParams(params) {
 }
 
 async function getVersion(ns, tenantId) {
-    const c = await getClient();
     const key = versionKey(ns, tenantId);
-    if (c) {
-        try {
-            const raw = await c.get(key);
-            return raw ? parseInt(raw, 10) || 0 : 0;
-        } catch { return 0; }
+    const raw = await redisCall('getVersion', (c) => c.get(key));
+    if (raw != null) return parseInt(raw, 10) || 0;
+    if (redisUnavailable || !REDIS_URL) {
+        return Number(getMemory().get(key)) || 0;
     }
     return Number(getMemory().get(key)) || 0;
 }
 
 async function bumpNs(ns, tenantId) {
-    const c = await getClient();
     const key = versionKey(ns, tenantId);
-    if (c) {
-        try { await c.incr(key); } catch (_) {}
-        return;
-    }
-    getMemory().incr(key);
+    const ok = await redisCall('incr', (c) => c.incr(key));
+    if (ok == null) getMemory().incr(key);
 }
 
 /** Invalidate multiple namespaces in one call. Each ns is bumped for the given tenant. */
@@ -120,13 +165,6 @@ function buildKey(ns, tenantId, version, paramsHash) {
 /**
  * Get-or-fetch with TTL. The fetcher is called only on cache miss.
  * Result must be JSON-serialisable.
- *
- * Options:
- *   ns        — namespace, e.g. 'products:list'
- *   tenantId  — tenant scope
- *   params    — object whose stable hash forms part of the key (page/filter/sort)
- *   ttlSec    — TTL in seconds (defaults to 60)
- *   skipCache — if true, bypass entirely (debug)
  */
 async function cached(opts, fetcher) {
     const { ns, tenantId, params, ttlSec = 60, skipCache = false } = opts || {};
@@ -134,51 +172,61 @@ async function cached(opts, fetcher) {
     if (typeof fetcher !== 'function') throw new Error('cache.cached: fetcher required');
     if (skipCache) return await fetcher();
 
-    const c = await getClient();
     const version = await getVersion(ns, tenantId);
     const key = buildKey(ns, tenantId, version, hashParams(params));
+    const ttl = Math.max(1, Math.floor(ttlSec));
 
+    const c = await getClient();
     if (c) {
         try {
-            const raw = await c.get(key);
+            const raw = await withTimeout(c.get(key), REDIS_OP_TIMEOUT_MS, 'get');
             if (raw) return JSON.parse(raw);
-        } catch (_) {}
-        const value = await fetcher();
-        try {
-            await c.setex(key, Math.max(1, Math.floor(ttlSec)), JSON.stringify(value));
-        } catch (_) {}
-        return value;
+            const value = await fetcher();
+            try {
+                await withTimeout(
+                    c.setex(key, ttl, JSON.stringify(value)),
+                    REDIS_OP_TIMEOUT_MS,
+                    'setex'
+                );
+            } catch (e) {
+                disableRedis(e.message || String(e));
+            }
+            return value;
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            // fall through to memory
+        }
     }
 
     const m = getMemory();
     const hit = m.get(key);
     if (hit !== null && hit !== undefined) return hit;
     const value = await fetcher();
-    m.set(key, value, ttlSec);
+    m.set(key, value, ttl);
     return value;
 }
 
 /** Lower-level helpers for ad-hoc keys (rare). */
 async function rawGet(key) {
-    const c = await getClient();
-    if (c) {
-        try { const raw = await c.get(key); return raw ? JSON.parse(raw) : null; } catch { return null; }
+    const raw = await redisCall('get', (c) => c.get(key));
+    if (typeof raw === 'string' && raw) {
+        try { return JSON.parse(raw); } catch { return null; }
     }
     return getMemory().get(key);
 }
 async function rawSet(key, value, ttlSec = 60) {
-    const c = await getClient();
-    if (c) { try { await c.setex(key, Math.max(1, ttlSec), JSON.stringify(value)); } catch (_) {} return; }
-    getMemory().set(key, value, ttlSec);
+    const ok = await redisCall('setex', (c) =>
+        c.setex(key, Math.max(1, ttlSec), JSON.stringify(value))
+    );
+    if (ok == null) getMemory().set(key, value, ttlSec);
 }
 async function rawDel(key) {
-    const c = await getClient();
-    if (c) { try { await c.del(key); } catch (_) {} return; }
-    getMemory().del(key);
+    const ok = await redisCall('del', (c) => c.del(key));
+    if (ok == null) getMemory().del(key);
 }
 
 function isRedisAvailable() {
-    return !!REDIS_URL;
+    return !!REDIS_URL && !redisUnavailable;
 }
 
 module.exports = {
