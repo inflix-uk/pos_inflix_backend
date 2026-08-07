@@ -294,14 +294,22 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         const name = String(p?.name || '').trim().toLowerCase();
         return name === 'product' || (!p?.brand && !p?.grade && !p?.brandModel && !p?.capacity && name.length <= 8);
     };
-    // Older SerialIndex rows stored name/price only — force legacy once so grade/colour come back.
+    // Older SerialIndex rows stored name/price only — force legacy once so grade/colour/model come back.
+    // Brand without brandModel is incomplete (shows "SAMSUNG 64GB GREY" after parcel model restore).
     const isIncompleteIndexProduct = (p) => {
         if (!p || isStubIndexProduct(p)) return true;
+        const brand = p.brand && String(p.brand).trim();
+        const brandModel = p.brandModel && String(p.brandModel).trim();
+        if (brand && !brandModel) return true;
+        if (brandModel) {
+            const nm = String(p.name || '').toUpperCase();
+            if (nm && !nm.includes(String(brandModel).toUpperCase())) return true;
+        }
         const hasVariantMeta = Boolean(
             (p.grade && String(p.grade).trim()) ||
             (p.colour && String(p.colour).trim()) ||
-            (p.brand && String(p.brand).trim()) ||
-            (p.brandModel && String(p.brandModel).trim()) ||
+            brand ||
+            brandModel ||
             (p.capacity && String(p.capacity).trim())
         );
         return !hasVariantMeta;
@@ -554,11 +562,18 @@ exports.getFindInStockSerialsBatch = asyncHandler(async (req, res) => {
         if (!p) return true;
         const name = String(p.name || '').trim().toLowerCase();
         if (name === 'product' || (!p.brand && !p.grade && !p.brandModel && !p.capacity && name.length <= 8)) return true;
+        const brand = p.brand && String(p.brand).trim();
+        const brandModel = p.brandModel && String(p.brandModel).trim();
+        if (brand && !brandModel) return true;
+        if (brandModel) {
+            const nm = String(p.name || '').toUpperCase();
+            if (nm && !nm.includes(String(brandModel).toUpperCase())) return true;
+        }
         return !(
             (p.grade && String(p.grade).trim()) ||
             (p.colour && String(p.colour).trim()) ||
-            (p.brand && String(p.brand).trim()) ||
-            (p.brandModel && String(p.brandModel).trim()) ||
+            brand ||
+            brandModel ||
             (p.capacity && String(p.capacity).trim())
         );
     };
@@ -2279,7 +2294,8 @@ exports.restorePurchaseBrandModels = asyncHandler(async (req, res) => {
         exports.invalidateStockPurchasesCache(tenantId);
         await cache.bumpMany(['purchases:list'], tenantId);
 
-        // Refresh SerialIndex + StockItem so scans / stock list show model again
+        // Refresh SerialIndex + StockItem so scans / stock list show model again.
+        // Preserve existing sold/in_stock status — only refresh product snapshots.
         const fresh = await Purchase.findById(purchaseId);
         if (fresh?.items?.length) {
             for (const it of fresh.items) {
@@ -2289,9 +2305,11 @@ exports.restorePurchaseBrandModels = asyncHandler(async (req, res) => {
                     if (!serial) continue;
                     const parts = [it.brand, it.brandModel, it.capacity, it.colour].filter(Boolean);
                     const name = formatProductName(parts.length > 0 ? parts.join(' ') : 'Product');
+                    const existing = await SerialIndex.findOne({ tenantId, serial }).select('status').lean();
+                    const status = existing?.status === 'sold' ? 'sold' : 'in_stock';
                     serialIndexService.upsertSerialIndex(tenantId, {
                         serial,
-                        status: 'in_stock',
+                        status,
                         productNameSnapshot: name,
                         skuSnapshot: `${fresh._id}-${it._id}`,
                         purchaseId: fresh._id,

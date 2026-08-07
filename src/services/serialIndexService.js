@@ -14,17 +14,33 @@ function indexToApiStatus(status) {
 }
 
 function productFromIndexDoc(doc) {
+    const brand = String(doc.brandSnapshot || '').trim();
+    const brandModel = String(doc.brandModelSnapshot || '').trim();
+    const capacity = String(doc.capacitySnapshot || '').trim();
+    const colour = String(doc.colourSnapshot || '').trim();
+    const grade = String(doc.gradeSnapshot || '').trim();
+    const composed = [brand, brandModel, capacity, colour].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const snapshot = String(doc.productNameSnapshot || '').trim();
+    // Prefer composed name when model is known — snapshot may be stale ("SAMSUNG 64GB GREY").
+    let name = snapshot;
+    if (brandModel && composed) {
+        const snapUp = snapshot.toUpperCase();
+        if (!snapshot || !snapUp.includes(brandModel.toUpperCase())) name = composed;
+        else name = snapshot;
+    } else if (!name && composed) {
+        name = composed;
+    }
     return {
         sku: doc.skuSnapshot || '',
-        name: String(doc.productNameSnapshot || '').trim(),
+        name,
         price: Number(doc.salePrice) || 0,
         category: String(doc.categorySnapshot || '').trim() || 'Uncategorized',
-        brand: String(doc.brandSnapshot || '').trim(),
+        brand,
         serial: doc.serial,
-        grade: String(doc.gradeSnapshot || '').trim(),
-        colour: String(doc.colourSnapshot || '').trim(),
-        brandModel: String(doc.brandModelSnapshot || '').trim(),
-        capacity: String(doc.capacitySnapshot || '').trim(),
+        grade,
+        colour,
+        brandModel,
+        capacity,
         purchaseId: doc.purchaseId ? doc.purchaseId.toString() : '',
         purchaseItemId: doc.purchaseItemId ? doc.purchaseItemId.toString() : '',
         purchaseDate: doc.purchaseDate ? new Date(doc.purchaseDate).toISOString() : null,
