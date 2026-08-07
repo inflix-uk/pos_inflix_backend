@@ -24,6 +24,7 @@ const {
 } = require('./purchaseController');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
+const { enrichSaleItemsFromPurchase } = require('../utils/enrichSaleItemsFromPurchase');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const {
     canViewHistoricalSales,
@@ -1363,6 +1364,10 @@ exports.createSale = asyncHandler(async (req, res) => {
         soldBy: req.user?.id
     };
 
+    // Rebuild incomplete line names / brandModel from the parcel that owns the IMEI
+    // (cart may still hold stale SerialIndex names after purchase model restore).
+    saleData.items = await enrichSaleItemsFromPurchase(saleData.items, tenantId);
+
     if (body.type === 'retail') {
         saleData.paymentMethod = body.paymentMethod || 'cash';
     } else {
@@ -1555,15 +1560,31 @@ exports.createSale = asyncHandler(async (req, res) => {
         res.setHeader('X-Server-Timing', timingHeader);
     }
 
-    const soldSerials = (saleData.items || []).flatMap((item) => (Array.isArray(item.serialNumbers) ? item.serialNumbers : []).map((s) => (s && String(s).trim()) || '').filter(Boolean));
-    for (const serial of soldSerials) {
-        serialIndexService.upsertSerialIndex(tenantId, {
-            serial,
-            status: 'sold',
-            saleId: sale._id,
-            saleReferenceSnapshot: refLabel || sale.reference || '',
-            customerNameSnapshot: (sale.customerName != null ? String(sale.customerName) : '') || '',
-        }).catch(() => {});
+    const soldSerials = [];
+    for (const item of saleData.items || []) {
+        const serials = Array.isArray(item.serialNumbers) ? item.serialNumbers : [];
+        for (const raw of serials) {
+            const serial = (raw && String(raw).trim()) || '';
+            if (!serial) continue;
+            soldSerials.push(serial);
+            serialIndexService.upsertSerialIndex(tenantId, {
+                serial,
+                status: 'sold',
+                saleId: sale._id,
+                saleReferenceSnapshot: refLabel || sale.reference || '',
+                customerNameSnapshot: (sale.customerName != null ? String(sale.customerName) : '') || '',
+                productNameSnapshot: item.name || undefined,
+                brand: item.brand || undefined,
+                brandModel: item.brandModel || undefined,
+                capacity: item.capacity || undefined,
+                colour: item.colour || undefined,
+                grade: item.grade || undefined,
+                purchaseId: item.purchaseId || undefined,
+                purchaseItemId: item.purchaseItemId || undefined,
+                unitCost: item.unit_cost_at_sale != null ? Number(item.unit_cost_at_sale) : undefined,
+                salePrice: item.price != null ? Number(item.price) : undefined,
+            }).catch(() => {});
+        }
     }
 
     // Sync StockItem (denormalized typeahead index): mark serial rows sold,

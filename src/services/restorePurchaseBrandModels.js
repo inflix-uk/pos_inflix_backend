@@ -371,6 +371,11 @@ async function restorePurchaseBrandModels(opts) {
             live.brandModel = model;
             live.variantValues = upsertBrandModelVariant(live.variantValues, model);
             live.markModified?.('variantValues');
+            // Keep denormalized item.name in sync so stock/invoice UIs that read name stay correct
+            const parts = [live.brand, model, live.capacity, live.colour, live.grade]
+                .map((x) => (x != null ? String(x).trim() : ''))
+                .filter(Boolean);
+            if (parts.length > 0) live.name = parts.join(' ').replace(/\s+/g, ' ').toUpperCase();
         }
     }
 

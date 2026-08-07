@@ -165,35 +165,57 @@ async function upsertSerialIndex(tenantId, payload) {
     const serial = normalizeSerial(payload.serial);
     if (!serial) return;
     const status = payload.status || 'not_found';
-    const doc = {
+    const $set = {
         tenantId: tenant,
         serial,
         status,
-        productId: payload.productId ?? null,
-        productNameSnapshot: payload.productNameSnapshot ?? '',
-        skuSnapshot: payload.skuSnapshot ?? '',
-        gradeSnapshot: payload.gradeSnapshot ?? payload.grade ?? '',
-        colourSnapshot: payload.colourSnapshot ?? payload.colour ?? '',
-        brandSnapshot: payload.brandSnapshot ?? payload.brand ?? '',
-        brandModelSnapshot: payload.brandModelSnapshot ?? payload.brandModel ?? '',
-        capacitySnapshot: payload.capacitySnapshot ?? payload.capacity ?? '',
-        categorySnapshot: payload.categorySnapshot ?? payload.category ?? '',
-        purchaseId: payload.purchaseId ?? null,
-        purchaseItemId: payload.purchaseItemId ?? null,
-        unitCost: payload.unitCost ?? null,
-        salePrice: payload.salePrice ?? null,
-        locationId: payload.locationId ?? null,
-        saleId: payload.saleId ?? null,
-        saleReferenceSnapshot: payload.saleReferenceSnapshot ?? '',
-        customerNameSnapshot: payload.customerNameSnapshot ?? '',
-        purchaseDate: payload.purchaseDate ? new Date(payload.purchaseDate) : null,
         updatedAt: new Date(),
     };
-    await SerialIndex.findOneAndUpdate(
+    // Only overwrite product/inventory snapshots when the caller provides them.
+    // Sale "mark sold" must not wipe brandModel/productName from the index.
+    const setIfDefined = (key, value) => {
+        if (value !== undefined) $set[key] = value;
+    };
+    setIfDefined('productId', payload.productId);
+    setIfDefined('productNameSnapshot', payload.productNameSnapshot);
+    setIfDefined('skuSnapshot', payload.skuSnapshot);
+    if (payload.gradeSnapshot !== undefined || payload.grade !== undefined) {
+        $set.gradeSnapshot = payload.gradeSnapshot ?? payload.grade ?? '';
+    }
+    if (payload.colourSnapshot !== undefined || payload.colour !== undefined) {
+        $set.colourSnapshot = payload.colourSnapshot ?? payload.colour ?? '';
+    }
+    if (payload.brandSnapshot !== undefined || payload.brand !== undefined) {
+        $set.brandSnapshot = payload.brandSnapshot ?? payload.brand ?? '';
+    }
+    if (payload.brandModelSnapshot !== undefined || payload.brandModel !== undefined) {
+        $set.brandModelSnapshot = payload.brandModelSnapshot ?? payload.brandModel ?? '';
+    }
+    if (payload.capacitySnapshot !== undefined || payload.capacity !== undefined) {
+        $set.capacitySnapshot = payload.capacitySnapshot ?? payload.capacity ?? '';
+    }
+    if (payload.categorySnapshot !== undefined || payload.category !== undefined) {
+        $set.categorySnapshot = payload.categorySnapshot ?? payload.category ?? '';
+    }
+    setIfDefined('purchaseId', payload.purchaseId);
+    setIfDefined('purchaseItemId', payload.purchaseItemId);
+    setIfDefined('unitCost', payload.unitCost);
+    setIfDefined('salePrice', payload.salePrice);
+    setIfDefined('locationId', payload.locationId);
+    setIfDefined('saleId', payload.saleId);
+    setIfDefined('saleReferenceSnapshot', payload.saleReferenceSnapshot);
+    setIfDefined('customerNameSnapshot', payload.customerNameSnapshot);
+    if (payload.purchaseDate !== undefined) {
+        $set.purchaseDate = payload.purchaseDate ? new Date(payload.purchaseDate) : null;
+    }
+
+    const saved = await SerialIndex.findOneAndUpdate(
         { tenantId: tenant, serial },
-        { $set: doc },
+        { $set },
         { upsert: true, new: true }
-    );
+    ).lean();
+
+    const doc = saved || $set;
     const apiStatus = status === 'sold' ? 'already_sold' : status;
     const cacheVal = { serial, status: apiStatus };
     if (apiStatus === 'in_stock' && (doc.skuSnapshot || doc.productNameSnapshot)) {
