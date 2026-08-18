@@ -1696,25 +1696,40 @@ exports.getReturnLines = asyncHandler(async (req, res) => {
         ? await SalesReturn.find({ linkedInvoiceRef: reference, tenantId }).lean()
         : [];
 
+    const serialKey = (s) => String(s || '').trim().toUpperCase();
+    const returnedByName = {}; // product name -> { qty, serials }
     const returnedBySku = {}; // sku -> { qty, serials }
+    const returnedSerialSet = new Set();
     for (const ret of returnsForInvoice) {
         for (const it of ret.items || []) {
-            const key = (it.product || '').trim();
-            if (!key) continue;
-            if (!returnedBySku[key]) returnedBySku[key] = { qty: 0, serials: [] };
-            returnedBySku[key].qty += Math.max(0, Number(it.quantity) || 0);
-            const serials = Array.isArray(it.serialNumbers) ? it.serialNumbers : [];
-            returnedBySku[key].serials.push(...serials.filter(Boolean));
+            const nameKey = (it.product || '').trim();
+            const skuKey = (it.sku || '').trim();
+            const qty = Math.max(0, Number(it.quantity) || 0);
+            const serials = (Array.isArray(it.serialNumbers) ? it.serialNumbers : []).filter(Boolean);
+            serials.forEach((s) => returnedSerialSet.add(serialKey(s)));
+            if (nameKey) {
+                if (!returnedByName[nameKey]) returnedByName[nameKey] = { qty: 0, serials: [] };
+                returnedByName[nameKey].qty += qty;
+                returnedByName[nameKey].serials.push(...serials);
+            }
+            if (skuKey) {
+                if (!returnedBySku[skuKey]) returnedBySku[skuKey] = { qty: 0, serials: [] };
+                returnedBySku[skuKey].qty += qty;
+                returnedBySku[skuKey].serials.push(...serials);
+            }
         }
     }
 
     const lines = (sale.items || []).map((item, idx) => {
         const name = (item.name || '').trim();
+        const sku = (item.sku || '').trim();
         const qtyPurchased = Math.max(0, Number(item.quantity) || 0);
-        const ret = returnedBySku[name] || { qty: 0, serials: [] };
-        const qtyAlreadyReturned = ret.qty;
+        const ret = returnedBySku[sku] || returnedByName[name] || { qty: 0, serials: [] };
         const soldSerials = Array.isArray(item.serialNumbers) ? item.serialNumbers.filter(Boolean) : [];
-        const returnableSerials = soldSerials.filter((s) => !ret.serials.includes(s));
+        const returnableSerials = soldSerials.filter((s) => !returnedSerialSet.has(serialKey(s)));
+        const qtyAlreadyReturned = soldSerials.length > 0
+            ? Math.max(0, soldSerials.length - returnableSerials.length)
+            : ret.qty;
         const qtyReturnable = soldSerials.length > 0
             ? returnableSerials.length
             : Math.max(0, qtyPurchased - qtyAlreadyReturned);
