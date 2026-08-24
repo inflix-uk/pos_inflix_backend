@@ -53,12 +53,7 @@ exports.recordCustomerPayment = asyncHandler(async (req, res) => {
     if (round2(Number(customer.balance) || 0) !== currentBalance) {
         customer.balance = currentBalance;
     }
-    if (payAmount > currentBalance) {
-        return res.status(400).json({
-            success: false,
-            message: `Payment (${payAmount.toFixed(2)}) exceeds outstanding balance (${currentBalance.toFixed(2)})`
-        });
-    }
+    // Overpayment is allowed: leftover becomes store credit (negative customer.balance).
     const entry = await LedgerEntry.create({
         accountType: 'customer',
         accountId: customerId,
