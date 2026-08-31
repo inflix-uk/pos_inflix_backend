@@ -111,12 +111,18 @@ const getInvoices = asyncHandler(async (req, res) => {
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const pageSize = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
 
+    // Sort by effective invoice date (occurredAt, else createdAt). Plain
+    // { occurredAt: -1 } pushes null occurredAt to the end, so recent invoices
+    // without occurredAt vanish from page 1 on wider ranges (e.g. 30 days).
     const [items, total] = await Promise.all([
-        Invoice.find(query)
-            .sort({ occurredAt: -1, createdAt: -1 })
-            .skip((pageNum - 1) * pageSize)
-            .limit(pageSize)
-            .lean(),
+        Invoice.aggregate([
+            { $match: query },
+            { $addFields: { _sortDate: { $ifNull: ['$occurredAt', '$createdAt'] } } },
+            { $sort: { _sortDate: -1, createdAt: -1, _id: -1 } },
+            { $skip: (pageNum - 1) * pageSize },
+            { $limit: pageSize },
+            { $project: { _sortDate: 0 } },
+        ]),
         Invoice.countDocuments(query),
     ]);
 
@@ -195,7 +201,7 @@ const createInvoice = asyncHandler(async (req, res) => {
                 bankAccount: body.bankAccount || '',
                 paymentMethod: body.paymentMethod,
                 soldBy: req.user ? req.user._id : null,
-                occurredAt: body.occurredAt ? new Date(body.occurredAt) : null,
+                occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
                 locationId: body.locationId || null,
                 tenantId,
                 note: body.note || '',
