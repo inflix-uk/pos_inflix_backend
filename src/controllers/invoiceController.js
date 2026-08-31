@@ -487,8 +487,8 @@ const sendInvoiceByEmail = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'PDF attachment is required' });
     }
 
-    const settings = await EmailSettings.findOne();
-    if (!settings) {
+    const settings = await EmailSettings.getSettings();
+    if (!settings || !settings.smtpHost) {
         return res.status(503).json({
             success: false,
             message: 'Email is not configured. Go to Settings → Email and save your SMTP settings.',

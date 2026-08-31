@@ -31,9 +31,9 @@ app.set('json spaces', 2);
 // Gzip/Brotli compression — reduces JSON payload size ~70-80%
 app.use(compression());
 
-// Body parser (increase limit for large imports e.g. parcel import with thousands of rows)
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Body parser (PDF email attachments + large parcel imports)
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // Security headers - configure to allow serving images
 app.use(helmet({

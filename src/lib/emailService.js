@@ -14,6 +14,10 @@ function transportOptionsFromSettings(settings) {
             user: settings.smtpUsername,
             pass: settings.smtpPassword,
         },
+        // Fail fast so Coolify/Traefik does not kill the request with a blank "Failed to fetch".
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 45000,
     };
     if (mode === 'tls' && !secure) {
         opts.requireTLS = true;
@@ -38,6 +42,9 @@ async function getEmailSettings() {
 }
 
 async function sendMail(settings, { to, subject, text, html, attachments }) {
+    if (!settings?.smtpHost || !settings?.smtpUsername || !settings?.fromEmail) {
+        throw new Error('Email is not configured. Go to Settings → Email and save your SMTP settings.');
+    }
     const transporter = nodemailer.createTransport(transportOptionsFromSettings(settings));
     const mailOptions = {
         from: formatFrom(settings),
@@ -51,7 +58,17 @@ async function sendMail(settings, { to, subject, text, html, attachments }) {
     if (replyTo) {
         mailOptions.replyTo = replyTo;
     }
-    return transporter.sendMail(mailOptions);
+    try {
+        return await transporter.sendMail(mailOptions);
+    } catch (err) {
+        const detail = err && err.message ? err.message : 'Failed to send email';
+        const host = settings.smtpHost;
+        const port = settings.smtpPort || 587;
+        if (/timeout|etimedout|econnrefused|enotfound|edns|certificate/i.test(detail)) {
+            throw new Error(`Mail server error (${host}:${port}): ${detail}`);
+        }
+        throw new Error(detail);
+    }
 }
 
 async function sendTestEmail(settings, testEmail) {
