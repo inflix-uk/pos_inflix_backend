@@ -31,7 +31,7 @@ function extractSubdomain(host) {
     // First part is subdomain (e.g. "gnr" from "gnr.inflix.uk")
     const subdomain = parts[0];
     // Skip reserved subdomains (api, www, admin, etc.)
-    const reserved = ['api', 'www', 'admin', 'platform', 'app', 'mail', 'ftp', 'cdn', 'static'];
+    const reserved = ['api', 'www', 'admin', 'platform', 'app', 'mail', 'ftp', 'cdn', 'static', 'posbackendapi'];
     if (reserved.includes(subdomain)) return null;
     // Return subdomain if it looks valid (alphanumeric + hyphens)
     if (/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(subdomain)) {
@@ -47,6 +47,17 @@ function extractSubdomain(host) {
  */
 async function resolveTenantFromHost(req, res, next) {
     try {
+        // 0. Explicit tenant from frontend or Next.js proxy (backend on a separate host)
+        const headerTenant = (req.headers['x-tenant-id'] || '').trim().toLowerCase();
+        if (headerTenant) {
+            req.resolvedTenant = {
+                tenantId: headerTenant,
+                subdomain: headerTenant,
+                status: 'active',
+            };
+            return next();
+        }
+
         // 1. Try Origin header first (works when backend is on a different domain)
         let subdomain = null;
         const origin = (req.headers.origin || '').trim();
