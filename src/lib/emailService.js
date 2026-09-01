@@ -23,11 +23,20 @@ function formatSmtpError(err, settings) {
     return `Mail server error (${host}:${port}): ${detail}`;
 }
 
-function transportOptionsFromSettings(settings) {
+function normalizeSmtpSecure(port, mode) {
+    const p = Number(port) || 587;
+    const m = String(mode || 'tls').toLowerCase();
+    // cPanel-style mail: 465 = implicit SSL, 587 = STARTTLS (TLS).
+    if (p === 465) return 'ssl';
+    if (p === 587 || p === 2525) return m === 'ssl' ? 'tls' : (m === 'none' ? 'tls' : m);
+    return m;
+}
+
+function transportOptionsFromSettings(settings, { fastFail = false } = {}) {
     const port = Number(settings.smtpPort) || 587;
-    const mode = settings.smtpSecure || 'tls';
+    const mode = normalizeSmtpSecure(port, settings.smtpSecure || 'tls');
     // Port 465 uses implicit TLS (SSL). Port 587 uses STARTTLS (secure: false + requireTLS).
-    const secure = mode === 'ssl' || port === 465;
+    const secure = mode === 'ssl';
     const host = String(settings.smtpHost || '').trim();
     const rejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== '0';
     const opts = {
@@ -38,9 +47,9 @@ function transportOptionsFromSettings(settings) {
             user: settings.smtpUsername,
             pass: settings.smtpPassword,
         },
-        connectionTimeout: 20000,
-        greetingTimeout: 20000,
-        socketTimeout: 60000,
+        connectionTimeout: fastFail ? 10000 : 20000,
+        greetingTimeout: fastFail ? 10000 : 20000,
+        socketTimeout: fastFail ? 15000 : 60000,
         tls: {
             servername: host,
             minVersion: 'TLSv1.2',
@@ -94,12 +103,28 @@ async function sendMail(settings, { to, subject, text, html, attachments }) {
 }
 
 async function sendTestEmail(settings, testEmail) {
-    return sendMail(settings, {
+    if (!settings?.smtpHost || !settings?.smtpUsername || !settings?.fromEmail) {
+        throw new Error('Email is not configured. Go to Settings → Email and save your SMTP settings.');
+    }
+    const transporter = nodemailer.createTransport(
+        transportOptionsFromSettings(settings, { fastFail: true })
+    );
+    const mailOptions = {
+        from: formatFrom(settings),
         to: testEmail,
         subject: 'Test Email from POS Inflix',
         text: 'This is a test email to verify your email settings are working correctly.',
         html: '<p>This is a test email to verify your email settings are working correctly.</p>',
-    });
+    };
+    const replyTo = formatReplyTo(settings);
+    if (replyTo) {
+        mailOptions.replyTo = replyTo;
+    }
+    try {
+        return await transporter.sendMail(mailOptions);
+    } catch (err) {
+        throw new Error(formatSmtpError(err, settings));
+    }
 }
 
 async function sendWithPdfAttachment(settings, { to, subject, text, html, pdfBuffer, filename }) {
@@ -119,6 +144,7 @@ async function sendWithPdfAttachment(settings, { to, subject, text, html, pdfBuf
 }
 
 module.exports = {
+    normalizeSmtpSecure,
     transportOptionsFromSettings,
     sendMail,
     sendTestEmail,

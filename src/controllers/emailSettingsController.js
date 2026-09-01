@@ -233,6 +233,7 @@ exports.testEmailSettings = asyncHandler(async (req, res) => {
     if (body.smtpPassword && String(body.smtpPassword).trim() && body.smtpPassword !== '********') {
         settings.smtpPassword = body.smtpPassword;
     }
+    settings.smtpSecure = emailService.normalizeSmtpSecure(settings.smtpPort, settings.smtpSecure);
 
     try {
         await emailService.sendTestEmail(settings, testEmail);
