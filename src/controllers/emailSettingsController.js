@@ -5,7 +5,7 @@ const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
-const SMTP_TEST_DEADLINE_MS = 12000;
+const SMTP_TEST_DEADLINE_MS = 8000;
 
 function withDeadline(promise, ms, timeoutMessage) {
     return Promise.race([

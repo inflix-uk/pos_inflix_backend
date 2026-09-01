@@ -1,4 +1,6 @@
 const nodemailer = require('nodemailer');
+const net = require('net');
+const tls = require('tls');
 const EmailSettings = require('../models/EmailSettings');
 
 function formatSmtpError(err, settings) {
@@ -62,6 +64,42 @@ function transportOptionsFromSettings(settings, { fastFail = false } = {}) {
     return opts;
 }
 
+function probeSmtpReachability(settings, timeoutMs = 6000) {
+    const port = Number(settings.smtpPort) || 587;
+    const mode = normalizeSmtpSecure(port, settings.smtpSecure || 'tls');
+    const secure = mode === 'ssl';
+    const host = String(settings.smtpHost || '').trim();
+    const rejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== '0';
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let socket;
+
+        const finish = (err) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try {
+                socket?.destroy();
+            } catch (_) { /* ignore */ }
+            if (err) reject(err);
+            else resolve();
+        };
+
+        const timer = setTimeout(() => finish(new Error('ETIMEDOUT')), timeoutMs);
+
+        if (secure) {
+            socket = tls.connect(
+                { host, port, servername: host, rejectUnauthorized },
+                () => finish()
+            );
+        } else {
+            socket = net.connect({ host, port }, () => finish());
+        }
+        socket.on('error', (err) => finish(err));
+    });
+}
+
 function formatFrom(settings) {
     const name = String(settings.fromName || '').replace(/"/g, "'");
     const email = settings.fromEmail;
@@ -106,6 +144,13 @@ async function sendTestEmail(settings, testEmail) {
     if (!settings?.smtpHost || !settings?.smtpUsername || !settings?.fromEmail) {
         throw new Error('Email is not configured. Go to Settings → Email and save your SMTP settings.');
     }
+
+    try {
+        await probeSmtpReachability(settings, 6000);
+    } catch (err) {
+        throw new Error(formatSmtpError(err, settings));
+    }
+
     const transporter = nodemailer.createTransport(
         transportOptionsFromSettings(settings, { fastFail: true })
     );
@@ -124,6 +169,8 @@ async function sendTestEmail(settings, testEmail) {
         return await transporter.sendMail(mailOptions);
     } catch (err) {
         throw new Error(formatSmtpError(err, settings));
+    } finally {
+        transporter.close();
     }
 }
 
