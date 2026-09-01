@@ -5,6 +5,17 @@ const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
+const SMTP_TEST_DEADLINE_MS = 12000;
+
+function withDeadline(promise, ms, timeoutMessage) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(timeoutMessage)), ms);
+        }),
+    ]);
+}
+
 const EMAIL_SETTINGS_NS = 'settings:email';
 async function invalidateEmailSettingsCache(tenantId) {
     await cache.bumpNs(EMAIL_SETTINGS_NS, tenantId);
@@ -235,8 +246,17 @@ exports.testEmailSettings = asyncHandler(async (req, res) => {
     }
     settings.smtpSecure = emailService.normalizeSmtpSecure(settings.smtpPort, settings.smtpSecure);
 
+    const host = settings.smtpHost || 'smtp';
+    const port = Number(settings.smtpPort) || 587;
+    const timeoutMessage =
+        `Mail server timed out (${host}:${port}). Check host/port, encryption (SSL on 465, TLS on 587), and that outbound SMTP is allowed from your server.`;
+
     try {
-        await emailService.sendTestEmail(settings, testEmail);
+        await withDeadline(
+            emailService.sendTestEmail(settings, testEmail),
+            SMTP_TEST_DEADLINE_MS,
+            timeoutMessage
+        );
     } catch (err) {
         const message = err && err.message ? String(err.message) : 'Failed to send test email';
         return res.status(502).json({

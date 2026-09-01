@@ -47,9 +47,9 @@ function transportOptionsFromSettings(settings, { fastFail = false } = {}) {
             user: settings.smtpUsername,
             pass: settings.smtpPassword,
         },
-        connectionTimeout: fastFail ? 10000 : 20000,
-        greetingTimeout: fastFail ? 10000 : 20000,
-        socketTimeout: fastFail ? 15000 : 60000,
+        connectionTimeout: fastFail ? 5000 : 20000,
+        greetingTimeout: fastFail ? 5000 : 20000,
+        socketTimeout: fastFail ? 8000 : 60000,
         tls: {
             servername: host,
             minVersion: 'TLSv1.2',
