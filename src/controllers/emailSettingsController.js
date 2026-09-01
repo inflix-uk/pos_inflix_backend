@@ -197,35 +197,55 @@ exports.deleteEmailSettings = asyncHandler(async (req, res) => {
 // @route   POST /api/settings/email/test
 // @access  Private/Admin/Manager
 exports.testEmailSettings = asyncHandler(async (req, res) => {
-    const settings = await EmailSettings.findOne();
+    const stored = await EmailSettings.findOne();
 
-    if (!settings) {
+    if (!stored) {
         return res.status(404).json({
             success: false,
-            message: 'Email settings not found. Please configure email settings first.'
+            message: 'Email settings not found. Please configure email settings first.',
         });
     }
 
     const { testEmail } = req.body;
+    const body = req.body || {};
 
     if (!testEmail) {
         return res.status(400).json({
             success: false,
-            message: 'Test email address is required'
+            message: 'Test email address is required',
         });
+    }
+
+    // Use current form values when provided so Test works before Save (password kept from DB if masked).
+    const settings = stored.toObject();
+    const mergeFields = [
+        'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUsername',
+        'fromEmail', 'fromName', 'replyToEmail', 'replyToName',
+    ];
+    for (const key of mergeFields) {
+        if (body[key] != null && String(body[key]).trim() !== '') {
+            settings[key] = body[key];
+        }
+    }
+    if (body.smtpPort != null && String(body.smtpPort).trim() !== '') {
+        settings.smtpPort = Number(body.smtpPort);
+    }
+    if (body.smtpPassword && String(body.smtpPassword).trim() && body.smtpPassword !== '********') {
+        settings.smtpPassword = body.smtpPassword;
     }
 
     try {
         await emailService.sendTestEmail(settings, testEmail);
     } catch (err) {
+        const message = err && err.message ? String(err.message) : 'Failed to send test email';
         return res.status(502).json({
             success: false,
-            message: err.message || 'Failed to send test email'
+            message,
         });
     }
 
     res.status(200).json({
         success: true,
-        message: `Test email sent to ${testEmail}`
+        message: `Test email sent to ${testEmail}`,
     });
 });
