@@ -8,7 +8,8 @@ const {
     saveEmailSettings,
     updateEmailSettings,
     deleteEmailSettings,
-    testEmailSettings
+    testEmailSettings,
+    getEmailSmtpSecrets
 } = require('../controllers/emailSettingsController');
 
 // All routes require authentication
@@ -75,6 +76,9 @@ router.route('/')
     .post(requirePermission('settings.edit'), emailSettingsValidation, validate, saveEmailSettings)
     .put(requirePermission('settings.edit'), updateEmailSettings)
     .delete(requirePermission('user.manage'), deleteEmailSettings);
+
+router.route('/smtp-secrets')
+    .get(requirePermission('settings.edit'), getEmailSmtpSecrets);
 
 router.route('/test')
     .post(requirePermission('settings.edit'), testEmailValidation, validate, testEmailSettings);

@@ -204,6 +204,23 @@ exports.deleteEmailSettings = asyncHandler(async (req, res) => {
     });
 });
 
+// @desc    Get SMTP credentials (unmasked) for server-side mail send
+// @route   GET /api/settings/email/smtp-secrets
+// @access  Private/settings.edit
+exports.getEmailSmtpSecrets = asyncHandler(async (req, res) => {
+    const settings = await EmailSettings.findOne();
+    if (!settings) {
+        return res.status(404).json({
+            success: false,
+            message: 'Email settings not found. Save your SMTP settings first.',
+        });
+    }
+    res.status(200).json({
+        success: true,
+        data: settings.toObject(),
+    });
+});
+
 // @desc    Test email settings
 // @route   POST /api/settings/email/test
 // @access  Private/Admin/Manager
