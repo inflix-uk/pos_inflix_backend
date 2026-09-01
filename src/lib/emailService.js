@@ -1,23 +1,51 @@
 const nodemailer = require('nodemailer');
 const EmailSettings = require('../models/EmailSettings');
 
+function formatSmtpError(err, settings) {
+    const host = settings?.smtpHost || 'smtp';
+    const port = Number(settings?.smtpPort) || 587;
+    const parts = [];
+    if (err?.code) parts.push(String(err.code));
+    if (err?.response) parts.push(String(err.response).trim());
+    const detail = parts.join(' — ') || (err?.message ? String(err.message) : 'Failed to send email');
+    if (/timeout|etimedout/i.test(detail)) {
+        return `Mail server timed out (${host}:${port}). Check host/port, encryption (SSL on 465, TLS on 587), and that outbound SMTP is allowed from your server.`;
+    }
+    if (/econnrefused|enotfound|edns|getaddrinfo/i.test(detail)) {
+        return `Cannot reach mail server (${host}:${port}): ${detail}`;
+    }
+    if (/certificate|self signed|unable to verify/i.test(detail)) {
+        return `TLS certificate error (${host}:${port}): ${detail}. Try port 587 with TLS, or ask your host to fix the mail certificate.`;
+    }
+    if (/auth|invalid login|535|534/i.test(detail)) {
+        return `SMTP login failed for ${settings?.smtpUsername || 'user'}@${host}: ${detail}. Check username and password (use an app password if required).`;
+    }
+    return `Mail server error (${host}:${port}): ${detail}`;
+}
+
 function transportOptionsFromSettings(settings) {
     const port = Number(settings.smtpPort) || 587;
     const mode = settings.smtpSecure || 'tls';
-    // Port 465 uses implicit TLS (SSL) even when the UI says "TLS".
+    // Port 465 uses implicit TLS (SSL). Port 587 uses STARTTLS (secure: false + requireTLS).
     const secure = mode === 'ssl' || port === 465;
+    const host = String(settings.smtpHost || '').trim();
+    const rejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== '0';
     const opts = {
-        host: settings.smtpHost,
+        host,
         port,
         secure,
         auth: {
             user: settings.smtpUsername,
             pass: settings.smtpPassword,
         },
-        // Fail fast so Coolify/Traefik does not kill the request with a blank "Failed to fetch".
-        connectionTimeout: 15000,
-        greetingTimeout: 15000,
-        socketTimeout: 45000,
+        connectionTimeout: 20000,
+        greetingTimeout: 20000,
+        socketTimeout: 60000,
+        tls: {
+            servername: host,
+            minVersion: 'TLSv1.2',
+            rejectUnauthorized,
+        },
     };
     if (mode === 'tls' && !secure) {
         opts.requireTLS = true;
@@ -61,13 +89,7 @@ async function sendMail(settings, { to, subject, text, html, attachments }) {
     try {
         return await transporter.sendMail(mailOptions);
     } catch (err) {
-        const detail = err && err.message ? err.message : 'Failed to send email';
-        const host = settings.smtpHost;
-        const port = settings.smtpPort || 587;
-        if (/timeout|etimedout|econnrefused|enotfound|edns|certificate/i.test(detail)) {
-            throw new Error(`Mail server error (${host}:${port}): ${detail}`);
-        }
-        throw new Error(detail);
+        throw new Error(formatSmtpError(err, settings));
     }
 }
 
