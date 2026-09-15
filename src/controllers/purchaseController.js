@@ -1468,6 +1468,9 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
     const capSet = new Set();
     const colSet = new Set();
     const locMap = {};
+    let serialStockValue = 0;
+    let nonSerialStockValue = 0;
+    const currencyCounts = Object.create(null);
     for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         const cat = (r.category || '').trim();
@@ -1484,7 +1487,27 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
         if (st && typeof st === 'object' && st._id) {
             locMap[String(st._id)] = st.name || 'Unnamed';
         }
+        const cost = Number(r.purchasePrice) || 0;
+        if (r.isSerialProduct) {
+            serialStockValue += cost;
+        } else {
+            const qty = Number(r.quantity);
+            nonSerialStockValue += cost * (Number.isFinite(qty) ? qty : 0);
+        }
+        const cur = (r.currency || '').trim();
+        if (cur) currencyCounts[cur] = (currencyCounts[cur] || 0) + 1;
     }
+    let stockCurrency = 'GBP';
+    let topCount = -1;
+    for (const cur of Object.keys(currencyCounts)) {
+        if (currencyCounts[cur] > topCount) {
+            topCount = currencyCounts[cur];
+            stockCurrency = cur;
+        }
+    }
+    // Round to 2dp for display stability
+    serialStockValue = Math.round(serialStockValue * 100) / 100;
+    nonSerialStockValue = Math.round(nonSerialStockValue * 100) / 100;
     const categories = [...catSet].sort();
     const brands = [...brandSet].sort();
     const brandModels = [...modelSet].sort();
@@ -1505,6 +1528,11 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
         total,
         page,
         pages,
+        stockValue: {
+            serial: serialStockValue,
+            nonSerial: nonSerialStockValue,
+            currency: stockCurrency,
+        },
         filterOptions: { categories, brands, brandModels, capacities, colours, locations }
     });
 });
