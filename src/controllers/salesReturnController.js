@@ -18,7 +18,7 @@ const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
-const SALES_RETURN_CACHE_NAMESPACES = ['salesReturns:list'];
+const SALES_RETURN_CACHE_NAMESPACES = ['salesReturns:list', 'purchases:stock-list'];
 async function invalidateSalesReturnCaches(tenantId) {
     await cache.bumpMany(SALES_RETURN_CACHE_NAMESPACES, tenantId);
     await cache.bumpNs('sales:list', tenantId);

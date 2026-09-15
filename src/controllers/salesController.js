@@ -39,7 +39,7 @@ const {
     computeWholesaleTotalOwing,
 } = require('../utils/wholesalePaymentAmounts');
 
-const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials'];
+const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials', 'purchases:stock-list'];
 async function invalidateSalesCaches(tenantId) {
     await cache.bumpMany(SALES_CACHE_NAMESPACES, tenantId);
     // Inventory products page reads from SWR caches in purchaseController; without these,

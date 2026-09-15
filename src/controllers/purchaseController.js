@@ -62,7 +62,7 @@ async function invalidateInventoryListCaches(tenantId) {
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
     exports.invalidateStockPurchasesCache(tenantId);
-    await cache.bumpMany(['purchases:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list'], tenantId);
 }
 
 /**
@@ -1083,8 +1083,161 @@ const _purchasesCache = _makeSwrCache({ freshMs: 60_000, maxStaleMs: 10 * 60_000
 // Barcode→productId map — small, derived from Product collection.
 const _barcodeMapCache = _makeSwrCache({ freshMs: 60_000, maxStaleMs: 10 * 60_000 });
 
-exports.invalidateStockSerialSetCache = function (tenantId) { _stockSerialSetCache.invalidate(tenantId); };
-exports.invalidateStockPurchasesCache = function (tenantId) { _purchasesCache.invalidate(tenantId); _barcodeMapCache.invalidate(tenantId); };
+exports.invalidateStockSerialSetCache = function (tenantId) {
+    _stockSerialSetCache.invalidate(tenantId);
+    // Stock list Redis payload depends on sold/returned serial sets.
+    cache.bumpNs('purchases:stock-list', tenantId).catch(() => {});
+};
+exports.invalidateStockPurchasesCache = function (tenantId) {
+    _purchasesCache.invalidate(tenantId);
+    _barcodeMapCache.invalidate(tenantId);
+    cache.bumpNs('purchases:stock-list', tenantId).catch(() => {});
+};
+
+async function fetchStockSerialSets() {
+    const [a, b, c] = await Promise.all([
+        distinctSerialNumbersSoldOnActiveSales(),
+        SerialHistory.distinct('serialNumber', { eventType: 'returned_to_supplier' }),
+        SoldSerial.distinct('serialNumber', { status: 'returned', returnDestination: 'return_to_supplier' }),
+    ]);
+    return { soldSerials: a, returnedToSupplierSerials: b, soldReturnedToSupplierSerials: c };
+}
+
+async function fetchStockPurchasesResolved(tenantId) {
+    const docs = await Purchase.find({ tenantId })
+        .select('purchaseNumber parcelNumber date createdAt currency status paymentStatus note supplier account items')
+        .populate('supplier', 'name contactPerson')
+        .populate('account', 'name contactPerson contactName')
+        .populate('items.category', 'name variantAttributes')
+        .populate('items.sendTo', 'name type')
+        .sort('-createdAt')
+        .limit(STOCK_VIEW_MAX_PURCHASES)
+        .lean();
+    const catIds = new Set();
+    for (const p of docs) {
+        for (const it of (p.items || [])) {
+            const c = it.category;
+            if (c && typeof c === 'object' && Array.isArray(c.variantAttributes)) {
+                for (const vid of c.variantAttributes) {
+                    if (vid && typeof vid !== 'object') catIds.add(String(vid));
+                }
+            }
+        }
+    }
+    if (catIds.size > 0) {
+        const VariantAttribute = require('../models/VariantAttribute');
+        const attrs = await VariantAttribute.find({ _id: { $in: [...catIds] } }).select('slug').lean();
+        const attrMap = new Map(attrs.map((a) => [String(a._id), a]));
+        for (const p of docs) {
+            for (const it of (p.items || [])) {
+                const c = it.category;
+                if (c && typeof c === 'object' && Array.isArray(c.variantAttributes)) {
+                    c.variantAttributes = c.variantAttributes.map((vid) => attrMap.get(String(vid)) || vid);
+                }
+            }
+        }
+    }
+    return docs;
+}
+
+const STOCK_LIST_VARIANT_SLUGS = {
+    brand: ['brand', 'brands', 'manufacturer'],
+    model: ['model', 'brand_model', 'brands_model', 'make'],
+    grade: ['grade', 'condition'],
+    capacity: ['capacity', 'storage'],
+    colour: ['colour', 'color'],
+};
+
+function resolveStockListVariant(item, kind, legacyKey) {
+    const slugs = STOCK_LIST_VARIANT_SLUGS[kind] || [];
+    const vv = Array.isArray(item?.variantValues) ? item.variantValues : [];
+    for (const entry of vv) {
+        const slug = String(entry?.slug || '').trim().toLowerCase();
+        const value = String(entry?.value || '').trim();
+        if (value && slugs.includes(slug)) return value;
+    }
+    return String(item?.[legacyKey] || '').trim();
+}
+
+function stockListCategoryName(category) {
+    if (!category) return '';
+    if (typeof category === 'object') return String(category.name || '').trim();
+    return '';
+}
+
+async function resolveStockPurchasesAndSerialSets(tenantId) {
+    const cachedSets = _stockSerialSetCache.get(tenantId);
+    const cachedPurchases = _purchasesCache.get(tenantId);
+
+    let setsP;
+    if (cachedSets) {
+        setsP = Promise.resolve(cachedSets.value);
+        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, fetchStockSerialSets);
+    } else {
+        setsP = _stockSerialSetCache.fetch(tenantId, fetchStockSerialSets);
+    }
+
+    let purchasesP;
+    if (cachedPurchases) {
+        purchasesP = Promise.resolve(cachedPurchases.value);
+        if (cachedPurchases.isStale) {
+            _purchasesCache.revalidate(tenantId, () => fetchStockPurchasesResolved(tenantId));
+        }
+    } else {
+        purchasesP = _purchasesCache.fetch(tenantId, () => fetchStockPurchasesResolved(tenantId));
+    }
+
+    const [setsVal, purchases] = await Promise.all([setsP, purchasesP]);
+    return { setsVal, purchases };
+}
+
+async function buildStockListItems(tenantId, status) {
+    const { setsVal, purchases } = await resolveStockPurchasesAndSerialSets(tenantId);
+    const soldSet = new Set((setsVal.soldSerials || []).map((s) => String(s).trim()).filter(Boolean));
+    const returnedToSupplierSet = new Set(
+        [...(setsVal.returnedToSupplierSerials || []), ...(setsVal.soldReturnedToSupplierSerials || [])]
+            .map((s) => String(s).trim())
+            .filter(Boolean)
+    );
+
+    const counts = new Map();
+    for (const purchase of purchases || []) {
+        if (status && String(purchase.status || '') !== status) continue;
+        for (const item of purchase.items || []) {
+            if (item?.isOtherItem === true) continue;
+            const imeis = Array.isArray(item.imeis) ? item.imeis : [];
+            if (imeis.length === 0) continue;
+
+            let available = 0;
+            for (const imei of imeis) {
+                const serial = String(imei || '').trim();
+                if (!serial) continue;
+                if (soldSet.has(serial)) continue;
+                if (returnedToSupplierSet.has(serial)) continue;
+                available += 1;
+            }
+            if (available <= 0) continue;
+
+            const path = [
+                `category:${stockListCategoryName(item.category)}`,
+                `brands:${resolveStockListVariant(item, 'brand', 'brand')}`,
+                `brands_model:${resolveStockListVariant(item, 'model', 'brandModel')}`,
+                `condition:${resolveStockListVariant(item, 'grade', 'grade')}`,
+                `capacity:${resolveStockListVariant(item, 'capacity', 'capacity')}`,
+                `color:${resolveStockListVariant(item, 'colour', 'colour')}`,
+            ];
+            const key = path.join('\u0000');
+            counts.set(key, (counts.get(key) || 0) + available);
+        }
+    }
+
+    return [...counts.entries()]
+        .map(([key, availableCount]) => ({
+            path: key.split('\u0000'),
+            availableCount,
+        }))
+        .sort((a, b) => a.path.join('\u0000').localeCompare(b.path.join('\u0000')));
+}
 
 /** Slugs in Edit Category display order (for stock table columns). */
 function getVariantAttributeSlugOrderFromCategory(cat) {
@@ -1294,54 +1447,6 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
     // Non-serial items have no IMEIs, so serial-related queries (sold set, returned-to-supplier) are unnecessary.
     const needsSerialQueries = productType !== 'non-serial';
 
-    // ── Fetcher fns: each fully refreshes one cache slice. Used for both cold fetch and SWR refresh. ──
-    const fetchSerialSets = async () => {
-        const [a, b, c] = await Promise.all([
-            distinctSerialNumbersSoldOnActiveSales(),
-            SerialHistory.distinct('serialNumber', { eventType: 'returned_to_supplier' }),
-            SoldSerial.distinct('serialNumber', { status: 'returned', returnDestination: 'return_to_supplier' }),
-        ]);
-        return { soldSerials: a, returnedToSupplierSerials: b, soldReturnedToSupplierSerials: c };
-    };
-
-    const fetchPurchasesAndResolve = async () => {
-        const docs = await Purchase.find({ tenantId })
-            .select('purchaseNumber parcelNumber date createdAt currency status paymentStatus note supplier account items')
-            .populate('supplier', 'name contactPerson')
-            .populate('account', 'name contactPerson contactName')
-            .populate('items.category', 'name variantAttributes')
-            .populate('items.sendTo', 'name type')
-            .sort('-createdAt')
-            .limit(STOCK_VIEW_MAX_PURCHASES)
-            .lean();
-        // Batch-resolve variantAttributes for every unique category in one query (replaces nested populate).
-        const catIds = new Set();
-        for (const p of docs) {
-            for (const it of (p.items || [])) {
-                const c = it.category;
-                if (c && typeof c === 'object' && Array.isArray(c.variantAttributes)) {
-                    for (const vid of c.variantAttributes) {
-                        if (vid && typeof vid !== 'object') catIds.add(String(vid));
-                    }
-                }
-            }
-        }
-        if (catIds.size > 0) {
-            const VariantAttribute = require('../models/VariantAttribute');
-            const attrs = await VariantAttribute.find({ _id: { $in: [...catIds] } }).select('slug').lean();
-            const attrMap = new Map(attrs.map((a) => [String(a._id), a]));
-            for (const p of docs) {
-                for (const it of (p.items || [])) {
-                    const c = it.category;
-                    if (c && typeof c === 'object' && Array.isArray(c.variantAttributes)) {
-                        c.variantAttributes = c.variantAttributes.map((vid) => attrMap.get(String(vid)) || vid);
-                    }
-                }
-            }
-        }
-        return docs;
-    };
-
     // ── SWR resolution: serve cached data immediately when available; trigger background refresh if stale. ──
     const cachedSets = needsSerialQueries ? _stockSerialSetCache.get(tenantId) : null;
     const cachedPurchases = _purchasesCache.get(tenantId);
@@ -1349,17 +1454,19 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
     let setsP, purchasesP;
     if (cachedSets) {
         setsP = Promise.resolve(cachedSets.value);
-        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, fetchSerialSets);
+        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, fetchStockSerialSets);
     } else if (needsSerialQueries) {
-        setsP = _stockSerialSetCache.fetch(tenantId, fetchSerialSets);
+        setsP = _stockSerialSetCache.fetch(tenantId, fetchStockSerialSets);
     } else {
         setsP = Promise.resolve({ soldSerials: [], returnedToSupplierSerials: [], soldReturnedToSupplierSerials: [] });
     }
     if (cachedPurchases) {
         purchasesP = Promise.resolve(cachedPurchases.value);
-        if (cachedPurchases.isStale) _purchasesCache.revalidate(tenantId, fetchPurchasesAndResolve);
+        if (cachedPurchases.isStale) {
+            _purchasesCache.revalidate(tenantId, () => fetchStockPurchasesResolved(tenantId));
+        }
     } else {
-        purchasesP = _purchasesCache.fetch(tenantId, fetchPurchasesAndResolve);
+        purchasesP = _purchasesCache.fetch(tenantId, () => fetchStockPurchasesResolved(tenantId));
     }
 
     const [setsVal, purchases] = await Promise.all([setsP, purchasesP]);
@@ -1855,7 +1962,7 @@ exports.createPurchase = asyncHandler(async (req, res) => {
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
     exports.invalidateStockPurchasesCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     // Populate the StockItem index for the new purchase (denormalized read model).
     stockItemService.rebuildForPurchase(populated).catch(() => {});
 
@@ -1969,7 +2076,7 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
     await activityLogService.logParcelEvent(req, 'PARCEL_UPDATED', purchase, { before: beforeSnapshot });
 
     invalidateForSalesCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
 
     const data = normalizePurchasesForResponse(purchase);
 
@@ -2032,7 +2139,7 @@ exports.updatePurchaseDetails = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     stockItemService.rebuildForPurchase(updated).catch(() => {});
 
     res.status(200).json({ success: true, data: normalizePurchasesForResponse(updated) });
@@ -2166,7 +2273,7 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
     exports.invalidateStockPurchasesCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
 
     const updated = await Purchase.findOne({ _id: purchaseId, tenantId })
         .populate('supplier', 'name contactPerson')
@@ -2261,7 +2368,7 @@ exports.deletePurchaseItem = asyncHandler(async (req, res) => {
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
     exports.invalidateStockPurchasesCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
 
     const updated = await Purchase.findOne({ _id: purchaseId, tenantId })
         .populate('supplier', 'name contactPerson')
@@ -2320,7 +2427,7 @@ exports.restorePurchaseBrandModels = asyncHandler(async (req, res) => {
         });
         invalidateForSalesCache(tenantId);
         exports.invalidateStockPurchasesCache(tenantId);
-        await cache.bumpMany(['purchases:list'], tenantId);
+        await cache.bumpMany(['purchases:list', 'purchases:stock-list'], tenantId);
 
         // Refresh SerialIndex + StockItem so scans / stock list show model again.
         // Preserve existing sold/in_stock status — only refresh product snapshots.
@@ -2383,166 +2490,18 @@ exports.restorePurchaseBrandModels = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getStockList = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
-    const query = { tenantId, status: 'Received' };
-    if (req.query.status) query.status = req.query.status;
+    const status = String(req.query.status || 'Received').trim() || 'Received';
 
-    const pipeline = [
-        { $match: query },
-        { $unwind: '$items' },
-        // Stock list is for serial (IMEI) items only; exclude non-serial (other) items
-        {
-            $match: {
-                'items.isOtherItem': { $ne: true },
-                $expr: { $gt: [{ $size: { $ifNull: ['$items.imeis', []] } }, 0] }
-            }
-        },
-        // Exclude sold IMEIs — only count available (unsold) serials
-        {
-            $lookup: {
-                from: 'soldserials',
-                let: { imeis: '$items.imeis' },
-                pipeline: [
-                    { $match: { $expr: { $in: ['$serialNumber', '$$imeis'] } } }
-                ],
-                as: 'soldForThisItem'
-            }
-        },
-        {
-            $addFields: {
-                totalImeis: { $size: { $ifNull: ['$items.imeis', []] } },
-                soldCount: { $size: '$soldForThisItem' }
-            }
-        },
-        {
-            $addFields: {
-                itemCount: { $max: [0, { $subtract: ['$totalImeis', '$soldCount'] }] }
-            }
-        },
-        { $match: { itemCount: { $gt: 0 } } },
-        {
-            $lookup: {
-                from: 'categories',
-                localField: 'items.category',
-                foreignField: '_id',
-                as: 'cat'
-            }
-        },
-        {
-            $addFields: {
-                categoryName: { $ifNull: [{ $arrayElemAt: ['$cat.name', 0] }, ''] }
-            }
-        },
-        // Source of truth for variant slots is items.variantValues (slug + value, written by every
-        // writer regardless of slug spelling). Resolve each canonical slot via slug synonym list,
-        // and fall back to the legacy field for old purchases that pre-date variantValues.
-        {
-            $addFields: {
-                _vvBrand: { $arrayElemAt: [{ $filter: {
-                    input: { $ifNull: ['$items.variantValues', []] },
-                    cond: { $in: [{ $toLower: { $ifNull: ['$$this.slug', ''] } }, ['brand', 'brands', 'manufacturer']] }
-                } }, 0] },
-                _vvModel: { $arrayElemAt: [{ $filter: {
-                    input: { $ifNull: ['$items.variantValues', []] },
-                    cond: { $in: [{ $toLower: { $ifNull: ['$$this.slug', ''] } }, ['model', 'brand_model', 'brands_model', 'make']] }
-                } }, 0] },
-                _vvGrade: { $arrayElemAt: [{ $filter: {
-                    input: { $ifNull: ['$items.variantValues', []] },
-                    cond: { $in: [{ $toLower: { $ifNull: ['$$this.slug', ''] } }, ['grade', 'condition']] }
-                } }, 0] },
-                _vvCapacity: { $arrayElemAt: [{ $filter: {
-                    input: { $ifNull: ['$items.variantValues', []] },
-                    cond: { $in: [{ $toLower: { $ifNull: ['$$this.slug', ''] } }, ['capacity', 'storage']] }
-                } }, 0] },
-                _vvColour: { $arrayElemAt: [{ $filter: {
-                    input: { $ifNull: ['$items.variantValues', []] },
-                    cond: { $in: [{ $toLower: { $ifNull: ['$$this.slug', ''] } }, ['colour', 'color']] }
-                } }, 0] }
-            }
-        },
-        {
-            $addFields: {
-                resolvedBrand: { $let: {
-                    vars: {
-                        vv: { $trim: { input: { $ifNull: ['$_vvBrand.value', ''] } } },
-                        lg: { $trim: { input: { $ifNull: ['$items.brand', ''] } } }
-                    },
-                    in: { $cond: [{ $gt: [{ $strLenCP: '$$vv' }, 0] }, '$$vv', '$$lg'] }
-                } },
-                resolvedModel: { $let: {
-                    vars: {
-                        vv: { $trim: { input: { $ifNull: ['$_vvModel.value', ''] } } },
-                        lg: { $trim: { input: { $ifNull: ['$items.brandModel', ''] } } }
-                    },
-                    in: { $cond: [{ $gt: [{ $strLenCP: '$$vv' }, 0] }, '$$vv', '$$lg'] }
-                } },
-                resolvedGrade: { $let: {
-                    vars: {
-                        vv: { $trim: { input: { $ifNull: ['$_vvGrade.value', ''] } } },
-                        lg: { $trim: { input: { $ifNull: ['$items.grade', ''] } } }
-                    },
-                    in: { $cond: [{ $gt: [{ $strLenCP: '$$vv' }, 0] }, '$$vv', '$$lg'] }
-                } },
-                resolvedCapacity: { $let: {
-                    vars: {
-                        vv: { $trim: { input: { $ifNull: ['$_vvCapacity.value', ''] } } },
-                        lg: { $trim: { input: { $ifNull: ['$items.capacity', ''] } } }
-                    },
-                    in: { $cond: [{ $gt: [{ $strLenCP: '$$vv' }, 0] }, '$$vv', '$$lg'] }
-                } },
-                resolvedColour: { $let: {
-                    vars: {
-                        vv: { $trim: { input: { $ifNull: ['$_vvColour.value', ''] } } },
-                        lg: { $trim: { input: { $ifNull: ['$items.colour', ''] } } }
-                    },
-                    in: { $cond: [{ $gt: [{ $strLenCP: '$$vv' }, 0] }, '$$vv', '$$lg'] }
-                } }
-            }
-        },
-        // Group by resolved canonical values so identical variants merge into one row regardless
-        // of which writer (Add/Edit/Import) created the purchase or which slug spelling was used.
-        {
-            $group: {
-                _id: {
-                    category: { $trim: { input: { $ifNull: ['$categoryName', ''] } } },
-                    brand: '$resolvedBrand',
-                    model: '$resolvedModel',
-                    grade: '$resolvedGrade',
-                    capacity: '$resolvedCapacity',
-                    colour: '$resolvedColour'
-                },
-                availableCount: { $sum: '$itemCount' }
-            }
-        },
-        // Path in fixed order: category, brands, brands_model, condition, capacity, color so filters and tree show Brand and Model.
-        // Send all segments (empty value kept) so tree always has the same levels; frontend shows (Unspecified) for empty.
-        {
-            $project: {
-                _id: 0,
-                path: [
-                    { $concat: ['category:', { $trim: { input: { $ifNull: ['$_id.category', ''] } } }] },
-                    { $concat: ['brands:', { $trim: { input: { $ifNull: ['$_id.brand', ''] } } }] },
-                    { $concat: ['brands_model:', { $trim: { input: { $ifNull: ['$_id.model', ''] } } }] },
-                    { $concat: ['condition:', { $trim: { input: { $ifNull: ['$_id.grade', ''] } } }] },
-                    { $concat: ['capacity:', { $trim: { input: { $ifNull: ['$_id.capacity', ''] } } }] },
-                    { $concat: ['color:', { $trim: { input: { $ifNull: ['$_id.colour', ''] } } }] }
-                ],
-                availableCount: 1
-            }
-        },
-        { $project: { path: 1, availableCount: 1 } },
-        { $sort: { path: 1 } }
-    ];
-
-    const rows = await Purchase.aggregate(pipeline);
-
-    const items = rows.map((r) => ({
-        path: r.path || [],
-        availableCount: r.availableCount || 0
-    }));
+    // Redis (or memory fallback) + reuse stock-view SWR purchase/sold caches.
+    // Cold path builds once; warm path is a cache hit. Sales/purchase mutations bump this ns.
+    const items = await cache.cached(
+        { ns: 'purchases:stock-list', tenantId, params: { status }, ttlSec: TTL.TRANSACTIONAL },
+        () => buildStockListItems(tenantId, status)
+    );
 
     res.status(200).json({
         success: true,
-        data: items
+        data: items,
     });
 });
 
@@ -2564,7 +2523,7 @@ exports.deletePurchase = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
-    await cache.bumpMany(['purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     stockItemService.removeForPurchase(tenantId, purchase._id).catch(() => {});
 
     res.status(200).json({
