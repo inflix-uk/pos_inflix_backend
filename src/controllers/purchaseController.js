@@ -1440,6 +1440,12 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
     const colour = (req.query.colour || '').trim();
     const imei = (req.query.imei || '').trim();
     const locationId = (req.query.locationId || '').trim() || null;
+    const dateFrom = (req.query.dateFrom || '').trim() || null;
+    const dateTo = (req.query.dateTo || '').trim() || null;
+    const dateFromMs = dateFrom ? Date.parse(`${dateFrom}T00:00:00.000Z`) : NaN;
+    const dateToMs = dateTo ? Date.parse(`${dateTo}T23:59:59.999Z`) : NaN;
+    const hasDateFrom = Number.isFinite(dateFromMs);
+    const hasDateTo = Number.isFinite(dateToMs);
 
     const tenantId = getTenantIdFromReq(req);
     const categoryIdPushedDown = false; // category filter is by name post-flatten (kept for downstream code)
@@ -1506,10 +1512,17 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
         if (search && !r._searchable.includes(search)) continue;
         if (locationId) {
             const sendTo = r.sendTo;
-            if (sendTo) {
-                const id = typeof sendTo === 'object' ? String(sendTo._id) : String(sendTo);
-                if (id !== locationId) continue;
-            }
+            const id = sendTo
+                ? (typeof sendTo === 'object' ? String(sendTo._id || '') : String(sendTo))
+                : '';
+            if (id !== locationId) continue;
+        }
+        if (hasDateFrom || hasDateTo) {
+            const raw = r.createdAt || r.date;
+            const ms = raw ? Date.parse(raw) : NaN;
+            if (!Number.isFinite(ms)) continue;
+            if (hasDateFrom && ms < dateFromMs) continue;
+            if (hasDateTo && ms > dateToMs) continue;
         }
         rows.push(r);
     }
