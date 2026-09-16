@@ -15,6 +15,11 @@ const redis = require('../lib/redis');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const { formatSupplierLabel } = require('../utils/supplierDisplay');
+const { getLondonDateKey } = require('../utils/dateKey');
+const {
+    canViewHistoricalSales,
+    getLondonDateUtcBounds,
+} = require('../utils/salesDateAccess');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -790,11 +795,19 @@ exports.getTrialBalance = asyncHandler(async (req, res) => {
 // @route   GET /api/accounts/profit-and-loss
 // @access  Private
 exports.getProfitAndLoss = asyncHandler(async (req, res) => {
-    const from = req.query.from ? new Date(req.query.from) : new Date(new Date().getFullYear(), 0, 1);
-    const to = req.query.to ? new Date(req.query.to) : new Date();
     const tid = getTenantIdFromReq(req);
     const locationIdParam = (req.query.locationId || 'all').trim().toLowerCase();
     const userScope = getUserLocationScope(req.user);
+
+    // Inclusive Europe/London day bounds (same as Takings) — never treat YYYY-MM-DD as UTC midnight.
+    const todayLondon = getLondonDateKey(new Date());
+    let fromKey = String(req.query.from || '').trim() || todayLondon;
+    let toKey = String(req.query.to || '').trim() || todayLondon;
+    if (!canViewHistoricalSales(req.user)) {
+        fromKey = todayLondon;
+        toKey = todayLondon;
+    }
+    const { fromUtc, toUtc } = getLondonDateUtcBounds(fromKey, toKey);
 
     if (userScope && userScope.length > 0) {
         if (!locationIdParam || locationIdParam === 'all') {
@@ -812,23 +825,30 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
 
     const saleDateMatch = {
         tenantId: tid,
-        $and: [
-            { status: { $ne: 'voided' } },
+        status: { $ne: 'voided' },
+        $or: [
+            { occurredAt: { $gte: fromUtc, $lte: toUtc } },
             {
-                $or: [
-                    { occurredAt: { $gte: from, $lte: to } },
-                    { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { createdAt: { $gte: from, $lte: to } }] }
-                ]
-            }
-        ]
+                $and: [
+                    { $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] },
+                    { createdAt: { $gte: fromUtc, $lte: toUtc } },
+                ],
+            },
+        ],
     };
     const returnDateMatch = {
         tenantId: tid,
         $or: [
-            { occurredAt: { $gte: from, $lte: to } },
-            { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { date: { $gte: from, $lte: to } }] },
-            { $and: [{ $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] }, { date: { $exists: false } }, { createdAt: { $gte: from, $lte: to } }] }
-        ]
+            { occurredAt: { $gte: fromUtc, $lte: toUtc } },
+            { occurredAt: null, date: { $gte: fromUtc, $lte: toUtc } },
+            {
+                $and: [
+                    { $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] },
+                    { date: null },
+                    { createdAt: { $gte: fromUtc, $lte: toUtc } },
+                ],
+            },
+        ],
     };
 
     if (locationIdParam !== 'all' && locationIdParam) {
@@ -840,7 +860,7 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
     const expenseDateMatch = {
         tenantId: tid,
         status: { $in: ['Approved', 'Paid'] },
-        occurredAtUtc: { $gte: from, $lte: to },
+        occurredAtUtc: { $gte: fromUtc, $lte: toUtc },
     };
 
     const [
@@ -1004,8 +1024,9 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         data: {
-            from,
-            to,
+            from: fromKey,
+            to: toKey,
+            timezone: 'Europe/London',
             location,
             revenue,
             salesRevenue,
