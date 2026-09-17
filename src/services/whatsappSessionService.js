@@ -31,18 +31,23 @@ function wipeAuthDir(dir) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
 }
 
-// If creds.json exists but the previous pair never completed (`registered: false`),
-// the saved state is unusable and Baileys will loop "attempting registration..." without
-// ever emitting a QR. Wipe so the next start is a clean pair.
-function clearStaleAuthIfUnregistered(dir) {
-    const credsPath = path.join(dir, 'creds.json');
-    if (!fs.existsSync(credsPath)) return;
+// Baileys logs in with saved creds when `creds.me` is set and otherwise starts a new
+// QR registration. (`creds.registered` is only set by the pairing-code flow and stays
+// false for QR pairing, so it can't be used to detect a completed pair.)
+function readPairedCreds(dir) {
     try {
-        const creds = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
-        if (creds && creds.registered !== true) wipeAuthDir(dir);
+        const creds = JSON.parse(fs.readFileSync(path.join(dir, 'creds.json'), 'utf8'));
+        return creds && creds.me && creds.me.id ? creds : null;
     } catch {
-        wipeAuthDir(dir);
+        return null;
     }
+}
+
+// If creds.json exists but the previous pair never completed, the saved state is
+// unusable. Wipe so the next start is a clean pair.
+function clearStaleAuthIfUnpaired(dir) {
+    if (!fs.existsSync(path.join(dir, 'creds.json'))) return;
+    if (!readPairedCreds(dir)) wipeAuthDir(dir);
 }
 
 const sessions = new Map(); // tenantId -> { sock, status, qrDataUrl, qrRaw, jid, startedAt, lastError, retries }
@@ -58,11 +63,9 @@ async function startSession(tenantId) {
 
     const dir = sessionDir(key);
     fs.mkdirSync(dir, { recursive: true });
-    // Only wipe stale auth on a fresh user-initiated start (no `existing` carry-over).
-    // During an internal retry after `restartRequired`, the just-paired creds
-    // legitimately have `registered: false` until the reconnect finalizes them —
-    // wiping there would destroy the user's pairing mid-flow.
-    if (!existing) clearStaleAuthIfUnregistered(dir);
+    // Only wipe stale auth on a fresh start (no `existing` carry-over) — never during
+    // an internal retry, which may be finishing a pair that's still in progress.
+    if (!existing) clearStaleAuthIfUnpaired(dir);
     const { state, saveCreds } = await useMultiFileAuthState(dir);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
 
@@ -134,16 +137,22 @@ async function startSession(tenantId) {
 
             if (isFatal) {
                 session.status = 'disconnected';
-                sessions.delete(key);
-                wipeAuthDir(dir);
+                // A superseded socket (e.g. closing after a manual logout) must not
+                // delete or wipe a newer session the user has already started.
+                if (sessions.get(key) === session) {
+                    sessions.delete(key);
+                    wipeAuthDir(dir);
+                }
                 return;
             }
 
-            // Transient drops or restartRequired: retry, but cap attempts so a bad
-            // session can't loop forever. After the cap, wipe and require user action.
+            // Transient drops or restartRequired: retry. An unfinished pair is capped so it
+            // can't loop forever (then wiped for a fresh QR). A paired session keeps retrying
+            // with backoff — a network blip must not unlink the account or strand the queue.
+            const paired = !!(state.creds && state.creds.me && state.creds.me.id);
             session.retries = (session.retries || 0) + 1;
             const MAX_RETRIES = 5;
-            if (session.retries > MAX_RETRIES) {
+            if (!paired && session.retries > MAX_RETRIES) {
                 session.status = 'disconnected';
                 session.lastError = 'WhatsApp pairing failed repeatedly — try again to generate a fresh QR.';
                 sessions.delete(key);
@@ -152,12 +161,17 @@ async function startSession(tenantId) {
             }
             session.status = 'connecting';
             const carryRetries = session.retries;
+            const retryDelayMs = paired && code !== DisconnectReason.restartRequired
+                ? Math.min(5000 * 2 ** Math.min(carryRetries - 1, 4), 60000)
+                : 1500;
             setTimeout(() => {
+                // Logged out (or replaced) while waiting — don't resurrect the session.
+                if (sessions.get(key) !== session) return;
                 // Carry the retry count forward via a shadow entry so the next
                 // startSession picks it up via `existing?.retries`.
                 sessions.set(key, { retries: carryRetries, status: 'restarting' });
                 startSession(key).catch(() => {});
-            }, 1500);
+            }, retryDelayMs);
         }
     });
 
@@ -189,17 +203,96 @@ async function logoutSession(tenantId) {
     return { status: 'disconnected' };
 }
 
-async function sendMessage(tenantId, phoneE164, text) {
-    const key = String(tenantId || 'default');
-    const s = sessions.get(key);
-    if (!s || s.status !== 'connected' || !s.sock) {
-        const err = new Error('WhatsApp not connected. Scan the QR first.');
-        err.code = 'WA_NOT_CONNECTED';
-        throw err;
-    }
-    const jid = `${String(phoneE164).replace(/\D/g, '')}@s.whatsapp.net`;
-    await s.sock.sendMessage(jid, { text });
-    return { sentTo: jid };
+function isConnected(tenantId) {
+    const s = sessions.get(String(tenantId || 'default'));
+    return !!(s && s.status === 'connected' && s.sock);
 }
 
-module.exports = { startSession, getStatus, logoutSession, sendMessage };
+function listConnectedTenants() {
+    const keys = [];
+    for (const [key, s] of sessions) {
+        if (s.status === 'connected' && s.sock) keys.push(key);
+    }
+    return keys;
+}
+
+function codedError(message, code) {
+    const err = new Error(message);
+    err.code = code;
+    return err;
+}
+
+/**
+ * Deliver one queued message. Only services/whatsappQueueWorker.js should call this —
+ * everything else must enqueue so the safety limits apply.
+ * Throws with code WA_NOT_CONNECTED, WA_NOT_ON_WHATSAPP or WA_SEND_FAILED.
+ */
+async function sendQueuedMessage(tenantId, { phone, text, attachment }) {
+    const s = sessions.get(String(tenantId || 'default'));
+    if (!s || s.status !== 'connected' || !s.sock) {
+        throw codedError('WhatsApp not connected. Scan the QR first.', 'WA_NOT_CONNECTED');
+    }
+    const digits = String(phone).replace(/\D/g, '');
+    let jid = `${digits}@s.whatsapp.net`;
+
+    // onWhatsApp only returns numbers that are registered, so an empty list means
+    // "not on WhatsApp". If the lookup itself fails, send to the plain JID.
+    let lookup;
+    try {
+        lookup = await s.sock.onWhatsApp(jid);
+    } catch {
+        lookup = undefined;
+    }
+    if (Array.isArray(lookup)) {
+        const match = lookup.find((r) => r && r.exists);
+        if (!match) throw codedError(`+${digits} is not registered on WhatsApp.`, 'WA_NOT_ON_WHATSAPP');
+        if (match.jid) jid = match.jid;
+    }
+
+    const content = attachment
+        ? {
+            document: Buffer.from(attachment.data),
+            mimetype: attachment.mimetype || 'application/octet-stream',
+            fileName: attachment.filename || 'document',
+            ...(text ? { caption: text } : {}),
+        }
+        : { text };
+
+    try {
+        const sent = await s.sock.sendMessage(jid, content);
+        return { jid, providerMessageId: (sent && sent.key && sent.key.id) || null };
+    } catch (e) {
+        throw codedError(e.message || 'WhatsApp send failed', 'WA_SEND_FAILED');
+    }
+}
+
+/** Reconnect every tenant that has a completed pairing on disk (called once at boot). */
+async function restoreSessions() {
+    let entries;
+    try {
+        entries = fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    const restored = [];
+    for (const entry of entries) {
+        if (!entry.isDirectory() || !readPairedCreds(path.join(SESSIONS_ROOT, entry.name))) continue;
+        try {
+            await startSession(entry.name);
+            restored.push(entry.name);
+        } catch (e) {
+            console.warn(`[whatsapp] could not restore session for tenant ${entry.name}: ${e.message}`);
+        }
+    }
+    return restored;
+}
+
+module.exports = {
+    startSession,
+    getStatus,
+    logoutSession,
+    isConnected,
+    listConnectedTenants,
+    sendQueuedMessage,
+    restoreSessions,
+};

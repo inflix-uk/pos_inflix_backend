@@ -13,6 +13,7 @@ const {
     checkReference,
     getNextReference,
     sendInvoiceByEmail,
+    sendInvoiceByWhatsapp,
 } = require('../controllers/invoiceController');
 
 router.use(protect);
@@ -48,6 +49,8 @@ router.post(
     validate,
     sendInvoiceByEmail
 );
+
+router.post('/:id/send-whatsapp', requirePermission('invoice.view'), sendInvoiceByWhatsapp);
 
 router.route('/:id')
     .get(requirePermission('invoice.view'), getInvoiceById)

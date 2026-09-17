@@ -190,6 +190,18 @@ const HOST = process.env.HOST || 'localhost';
 const server = app.listen(PORT, () => {
     console.log(`Server running in ${process.env.NODE_ENV} mode`);
     console.log(`URL: http://${HOST}:${PORT}`);
+    // WhatsApp: reconnect previously paired accounts and start the send queue.
+    // Failures here must never take the API down.
+    try {
+        require('./services/whatsappQueueWorker').start();
+        require('./services/whatsappSessionService').restoreSessions()
+            .then((tenants) => {
+                if (tenants.length) console.log(`WhatsApp: restoring sessions for ${tenants.join(', ')}`);
+            })
+            .catch((e) => console.warn(`WhatsApp: session restore failed (${e.message})`));
+    } catch (e) {
+        console.warn(`WhatsApp: queue worker not started (${e.message})`);
+    }
     // Probe Redis cache so the boot log shows whether the shared cache is live
     // or we're falling back to the in-process memory cache.
     (async () => {
