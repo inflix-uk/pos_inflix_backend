@@ -22,4 +22,20 @@ function getLondonMonthRange() {
     };
 }
 
-module.exports = { getLondonDateKey, getLondonMonthRange };
+/**
+ * UTC instant of London midnight that starts the London calendar day containing `date`.
+ * Used for per-day limits that reset at local midnight.
+ * London is UTC+0 or UTC+1 and DST switches at 01:00 UTC (never around midnight),
+ * so the offset observed at UTC midnight of that date is the offset at London midnight.
+ */
+function getLondonDayStart(date) {
+    const d = date instanceof Date ? date : new Date(date);
+    const [y, m, day] = getLondonDateKey(d).split('-').map(Number);
+    const utcMidnight = Date.UTC(y, m - 1, day);
+    const londonHourAtUtcMidnight = Number(
+        new Date(utcMidnight).toLocaleString('en-GB', { timeZone: 'Europe/London', hour: 'numeric', hourCycle: 'h23' })
+    );
+    return new Date(utcMidnight - londonHourAtUtcMidnight * 60 * 60 * 1000);
+}
+
+module.exports = { getLondonDateKey, getLondonMonthRange, getLondonDayStart };

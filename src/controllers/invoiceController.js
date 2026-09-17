@@ -534,6 +534,66 @@ const sendInvoiceByEmail = asyncHandler(async (req, res) => {
     });
 });
 
+/**
+ * Queue an invoice PDF for delivery from the tenant's connected WhatsApp.
+ * The PDF is rendered by the client (same as Download PDF / email). Sending is
+ * paced by the WhatsApp safety limits, so the response is 202 (queued).
+ */
+const sendInvoiceByWhatsapp = asyncHandler(async (req, res) => {
+    const invoice = await Invoice.findById(req.params.id).lean();
+    if (!invoice) {
+        return res.status(404).json({ success: false, message: 'Invoice not found' });
+    }
+
+    const tenantId = getTenantIdFromReq(req);
+    if (!whatsappSession.isConnected(tenantId)) {
+        return res.status(409).json({
+            success: false,
+            code: 'WA_NOT_CONNECTED',
+            message: 'WhatsApp is not connected. Go to Settings → WhatsApp and scan the QR code.',
+        });
+    }
+
+    const { phone, pdfBase64, filename, message } = req.body || {};
+    if (!pdfBase64) {
+        return res.status(400).json({ success: false, message: 'PDF attachment is required' });
+    }
+    const pdfBuffer = Buffer.from(String(pdfBase64), 'base64');
+    if (pdfBuffer.length < 100 || pdfBuffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+        return res.status(400).json({ success: false, message: 'PDF attachment is empty or invalid' });
+    }
+
+    const ref = invoice.reference || 'invoice';
+    const customer = invoice.customerName || 'Customer';
+    const safeFilename = String(filename || `invoice-${ref}.pdf`).replace(/[/\\]/g, '_').slice(0, 255);
+    const total = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(invoice.total) || 0);
+    const caption = String(message || '').trim() || `Invoice ${ref} for ${customer}. Total: ${total}.`;
+
+    try {
+        const out = await whatsappQueue.enqueueMessage({
+            phone,
+            recipientName: customer,
+            text: caption,
+            attachment: { filename: safeFilename, mimetype: 'application/pdf', data: pdfBuffer },
+            source: 'invoice',
+            sourceRef: { invoiceId: invoice._id, reference: invoice.reference },
+            dedupeKey: whatsappQueue.invoiceDedupeKey(invoice._id),
+            createdByUserId: req.user && req.user._id,
+        });
+        whatsappWorker.kick(tenantId);
+        return res.status(202).json({
+            success: true,
+            message: `Invoice ${ref} queued for WhatsApp to +${out.message.recipientPhone}`,
+            data: out,
+        });
+    } catch (e) {
+        if (e instanceof whatsappQueue.WhatsappQueueError) {
+            return res.status(e.status).json({ success: false, code: e.code, message: e.message });
+        }
+        throw e;
+    }
+});
+
 module.exports = {
     getInvoices,
     getInvoiceById,
@@ -544,4 +604,5 @@ module.exports = {
     checkReference,
     getNextReference,
     sendInvoiceByEmail,
+    sendInvoiceByWhatsapp,
 };
