@@ -48,10 +48,6 @@ function mergeLedgerRowsToBuckets(rows) {
   return b;
 }
 
-function sumBucketIn(b) {
-  return (b.cash?.in || 0) + (b.card?.in || 0) + (b.bank?.in || 0) + (b.credit?.in || 0);
-}
-
 function sumBucketOut(b) {
   return (b.cash?.out || 0) + (b.card?.out || 0) + (b.bank?.out || 0) + (b.credit?.out || 0);
 }
@@ -200,8 +196,8 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
 
   const scopeKey = (userScope && userScope.length) ? userScope.sort().join(',') : 'all';
   const cacheKeySuffix = useUtcRange
-    ? `takingsdash:shift:v1:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`
-    : `takingsdash:v4:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`;
+    ? `takingsdash:shift:v2:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`
+    : `takingsdash:v5:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`;
   if (!useUtcRange) {
     const cached = await redis.getDashboardCache(cacheKeySuffix);
     if (cached) {
@@ -256,23 +252,28 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     ? { $gte: rangeFromUtc, $lte: rangeToUtc }
     : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') };
 
+  // Payment IN from sales created in the selected period only.
+  // Cap attributed tender to Sale.total so previousBalance settled at checkout is excluded.
+  // Never use PaymentLedgerEntry dates for IN (those include older-balance collections).
   const salePaymentPipeline = (fastTimeMatch
     ? [{ $match: saleMatch }]
     : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
   ).concat([
     {
       $project: {
-        isWholesale: { $eq: ['$type', 'wholesale'] },
         payCash: { $ifNull: ['$payments.cash', 0] },
         payCard: { $ifNull: ['$payments.card', 0] },
         payBank: { $ifNull: ['$payments.bank', 0] },
+        payCredit: { $ifNull: ['$payments.credit', 0] },
         total: { $ifNull: ['$total', 0] },
-        pm: { $ifNull: ['$paymentMethod', 'cash'] },
+        pm: {
+          $toLower: {
+            $ifNull: ['$paymentMethod', 'cash'],
+          },
+        },
       },
     },
     {
-      // Attribute payments to this sale's invoice total only (exclude previousBalance
-      // settled at wholesale checkout). Matches Sales KPI period (Sale.total).
       $addFields: {
         invoiceNet: { $max: [0, '$total'] },
         tendered: {
@@ -282,13 +283,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     },
     {
       $addFields: {
-        attributable: {
-          $cond: [
-            { $lte: ['$tendered', 0] },
-            0,
-            { $min: ['$tendered', '$invoiceNet'] },
-          ],
-        },
+        hasTender: { $gt: ['$tendered', 0.000001] },
         scale: {
           $cond: [
             { $lte: ['$tendered', 0.000001] },
@@ -307,28 +302,48 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
       $project: {
         cashIn: {
           $cond: [
-            '$isWholesale',
+            '$hasTender',
             { $multiply: ['$payCash', '$scale'] },
-            { $cond: [{ $eq: ['$pm', 'cash'] }, '$invoiceNet', 0] },
+            {
+              $cond: [
+                { $eq: ['$pm', 'cash'] },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         cardIn: {
           $cond: [
-            '$isWholesale',
+            '$hasTender',
             { $multiply: ['$payCard', '$scale'] },
-            { $cond: [{ $eq: ['$pm', 'card'] }, '$invoiceNet', 0] },
+            {
+              $cond: [
+                { $eq: ['$pm', 'card'] },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         bankIn: {
           $cond: [
-            '$isWholesale',
+            '$hasTender',
             { $multiply: ['$payBank', '$scale'] },
-            { $cond: [{ $eq: ['$pm', 'bank'] }, '$invoiceNet', 0] },
+            {
+              $cond: [
+                {
+                  $or: [{ $eq: ['$pm', 'bank'] }, { $eq: ['$pm', 'transfer'] }],
+                },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         creditIn: {
           $cond: [
-            '$isWholesale',
+            '$hasTender',
             {
               $max: [
                 0,
@@ -346,7 +361,19 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
                 },
               ],
             },
-            { $cond: [{ $eq: ['$pm', 'credit'] }, '$invoiceNet', 0] },
+            {
+              $cond: [
+                { $eq: ['$pm', 'credit'] },
+                '$invoiceNet',
+                {
+                  $cond: [
+                    { $gt: ['$payCredit', 0] },
+                    '$invoiceNet',
+                    0,
+                  ],
+                },
+              ],
+            },
           ],
         },
       },
@@ -554,8 +581,6 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     bank: round2(Number(saleInRow.bankIn) || 0),
     credit: round2(Number(saleInRow.creditIn) || 0),
   };
-  const totalSaleIn = saleIn.cash + saleIn.card + saleIn.bank + saleIn.credit;
-  const totalLedgerIn = sumBucketIn(ledgerBuckets);
 
   const paymentBuckets = {
     cash: { in: 0, out: 0 },
@@ -564,21 +589,12 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     credit: { in: 0, out: 0 },
   };
 
-  // Payment IN: always from sales in the selected date range, capped to each invoice
-  // (excludes previous-balance settlement paid at wholesale checkout).
-  // Fall back to ledger only when there are no in-range sales with payment data.
-  // Payment OUT: still from ledger (refunds/voids) in the same date range.
-  if (totalSaleIn > 0.01) {
-    paymentBuckets.cash.in = saleIn.cash;
-    paymentBuckets.card.in = saleIn.card;
-    paymentBuckets.bank.in = saleIn.bank;
-    paymentBuckets.credit.in = saleIn.credit;
-  } else if (totalLedgerIn > 0.01) {
-    paymentBuckets.cash.in = ledgerBuckets.cash.in;
-    paymentBuckets.card.in = ledgerBuckets.card.in;
-    paymentBuckets.bank.in = ledgerBuckets.bank.in;
-    paymentBuckets.credit.in = ledgerBuckets.credit.in;
-  }
+  // Payment IN: only from sales created in the selected range (never ledger-by-date).
+  paymentBuckets.cash.in = saleIn.cash;
+  paymentBuckets.card.in = saleIn.card;
+  paymentBuckets.bank.in = saleIn.bank;
+  paymentBuckets.credit.in = saleIn.credit;
+  // Payment OUT: ledger refunds/voids in the same date range (plus proportional fallback below).
   paymentBuckets.cash.out = ledgerBuckets.cash.out;
   paymentBuckets.card.out = ledgerBuckets.card.out;
   paymentBuckets.bank.out = ledgerBuckets.bank.out;
