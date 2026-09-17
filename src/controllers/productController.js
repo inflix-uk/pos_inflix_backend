@@ -214,7 +214,12 @@ exports.getSerialHistory = asyncHandler(async (req, res) => {
     } else {
         const saleOk = (s) => s && s.status !== 'voided';
         if (soldRecord && saleOk(soldRecord.saleId)) {
-            status = soldRecord.status === 'returned' ? 'returned' : 'sold';
+            if (soldRecord.status === 'returned') {
+                // Restocked units are sellable again — show in stock. Other destinations stay "returned".
+                status = soldRecord.returnDestination === 'in_stock' ? 'in_stock' : 'returned';
+            } else {
+                status = 'sold';
+            }
         } else if (salesWithSerial && salesWithSerial.length > 0) {
             status = 'sold';
         } else {

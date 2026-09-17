@@ -1,11 +1,15 @@
 /**
  * Redis client for shared cache (tenant-aware serial lookup).
- * If REDIS_URL not set, fallback to in-memory cache so dev works without Redis.
+ * If REDIS_URL not set or Redis hangs, fall back to in-memory so POS scans never stall.
  */
 const REDIS_URL = process.env.REDIS_URL;
 const TENANT_ID = process.env.TENANT_ID || 'default';
+const REDIS_OP_TIMEOUT_MS = Math.max(500, parseInt(process.env.REDIS_OP_TIMEOUT_MS || '2000', 10) || 2000);
+const REDIS_DISABLED_BY_ENV = process.env.CACHE_DISABLE_REDIS === '1' || process.env.CACHE_DISABLE_REDIS === 'true';
 
 let client = null;
+let redisUnavailable = REDIS_DISABLED_BY_ENV;
+let connecting = null;
 let memoryFallback = null;
 
 function getMemoryFallback() {
@@ -35,18 +39,64 @@ function getMemoryFallback() {
     return memoryFallback;
 }
 
+function withTimeout(promise, ms, label) {
+    let timer;
+    return Promise.race([
+        Promise.resolve(promise),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Redis ${label} timed out after ${ms}ms`)), ms);
+        }),
+    ]).finally(() => {
+        if (timer) clearTimeout(timer);
+    });
+}
+
+function disableRedis(reason) {
+    if (redisUnavailable) return;
+    redisUnavailable = true;
+    console.warn('[redis] Disabled for this process; using memory fallback:', reason);
+    try {
+        if (client) client.disconnect(false);
+    } catch (_) {}
+    client = null;
+    connecting = null;
+}
+
 async function getClient() {
+    if (redisUnavailable) return null;
     if (client) return client;
     if (!REDIS_URL || REDIS_URL === '') return null;
-    try {
-        const Redis = require('ioredis');
-        client = new Redis(REDIS_URL, { maxRetriesPerRequest: 2, lazyConnect: true });
-        await client.connect();
-        return client;
-    } catch (e) {
-        console.warn('Redis connect failed, using in-memory fallback:', e.message);
-        return null;
-    }
+    if (connecting) return connecting;
+
+    connecting = (async () => {
+        try {
+            const Redis = require('ioredis');
+            const c = new Redis(REDIS_URL, {
+                maxRetriesPerRequest: 1,
+                enableOfflineQueue: false,
+                lazyConnect: true,
+                connectTimeout: REDIS_OP_TIMEOUT_MS,
+                commandTimeout: REDIS_OP_TIMEOUT_MS,
+                retryStrategy: () => null,
+            });
+            c.on('error', (err) => {
+                if (err && /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|READONLY/i.test(String(err.message || ''))) {
+                    disableRedis(err.message);
+                }
+            });
+            await withTimeout(c.connect(), REDIS_OP_TIMEOUT_MS, 'connect');
+            await withTimeout(c.ping(), REDIS_OP_TIMEOUT_MS, 'ping');
+            client = c;
+            return client;
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            return null;
+        } finally {
+            connecting = null;
+        }
+    })();
+
+    return connecting;
 }
 
 const CACHE_KEY_PREFIX = 'serial:lookup:';
@@ -63,10 +113,11 @@ async function get(tenantId, serial) {
     const c = await getClient();
     if (c) {
         try {
-            const raw = await c.get(key);
+            const raw = await withTimeout(c.get(key), REDIS_OP_TIMEOUT_MS, 'get');
             return raw ? JSON.parse(raw) : null;
-        } catch {
-            return null;
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            return getMemoryFallback().get(key);
         }
     }
     return getMemoryFallback().get(key);
@@ -79,8 +130,11 @@ async function set(tenantId, serial, value) {
     const c = await getClient();
     if (c) {
         try {
-            await c.setex(key, ttl, JSON.stringify(value));
-        } catch (_) {}
+            await withTimeout(c.setex(key, ttl, JSON.stringify(value)), REDIS_OP_TIMEOUT_MS, 'setex');
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            getMemoryFallback().set(key, value);
+        }
         return;
     }
     getMemoryFallback().set(key, value);
@@ -91,8 +145,11 @@ async function del(tenantId, serial) {
     const c = await getClient();
     if (c) {
         try {
-            await c.del(key);
-        } catch (_) {}
+            await withTimeout(c.del(key), REDIS_OP_TIMEOUT_MS, 'del');
+        } catch (e) {
+            disableRedis(e.message || String(e));
+            getMemoryFallback().del(key);
+        }
         return;
     }
     getMemoryFallback().del(key);
@@ -103,9 +160,10 @@ async function mget(tenantId, serials) {
     const c = await getClient();
     if (c) {
         try {
-            const raw = await c.mget(...keys);
+            const raw = await withTimeout(c.mget(...keys), REDIS_OP_TIMEOUT_MS, 'mget');
             return raw.map((r) => (r ? JSON.parse(r) : null));
-        } catch {
+        } catch (e) {
+            disableRedis(e.message || String(e));
             return getMemoryFallback().mget(keys);
         }
     }
@@ -117,7 +175,7 @@ async function invalidate(tenantId, serial) {
 }
 
 function isRedisAvailable() {
-    return !!REDIS_URL && REDIS_URL !== '';
+    return !!REDIS_URL && REDIS_URL !== '' && !redisUnavailable;
 }
 
 const DASHBOARD_CACHE_PREFIX = 'reports:dashboard:';
@@ -130,9 +188,10 @@ async function getDashboardCacheVersion(tenantId) {
     const c = await getClient();
     if (!c) return 0;
     try {
-        const raw = await c.get(DASHBOARD_VERSION_KEY_PREFIX + tid);
+        const raw = await withTimeout(c.get(DASHBOARD_VERSION_KEY_PREFIX + tid), REDIS_OP_TIMEOUT_MS, 'dashboardVersion');
         return raw ? parseInt(raw, 10) || 0 : 0;
-    } catch {
+    } catch (e) {
+        disableRedis(e.message || String(e));
         return 0;
     }
 }
@@ -143,8 +202,10 @@ async function incrDashboardCacheVersion(tenantId) {
     const c = await getClient();
     if (!c) return;
     try {
-        await c.incr(DASHBOARD_VERSION_KEY_PREFIX + tid);
-    } catch (_) {}
+        await withTimeout(c.incr(DASHBOARD_VERSION_KEY_PREFIX + tid), REDIS_OP_TIMEOUT_MS, 'dashboardIncr');
+    } catch (e) {
+        disableRedis(e.message || String(e));
+    }
 }
 
 async function getDashboardCache(keySuffix) {
@@ -153,9 +214,10 @@ async function getDashboardCache(keySuffix) {
     try {
         const version = await getDashboardCacheVersion();
         const key = DASHBOARD_CACHE_PREFIX + (keySuffix || '') + ':v' + version;
-        const raw = await c.get(key);
+        const raw = await withTimeout(c.get(key), REDIS_OP_TIMEOUT_MS, 'dashboardGet');
         return raw ? JSON.parse(raw) : null;
-    } catch {
+    } catch (e) {
+        disableRedis(e.message || String(e));
         return null;
     }
 }
@@ -166,8 +228,10 @@ async function setDashboardCache(keySuffix, value) {
     try {
         const version = await getDashboardCacheVersion();
         const key = DASHBOARD_CACHE_PREFIX + (keySuffix || '') + ':v' + version;
-        await c.setex(key, DASHBOARD_CACHE_TTL, JSON.stringify(value));
-    } catch (_) {}
+        await withTimeout(c.setex(key, DASHBOARD_CACHE_TTL, JSON.stringify(value)), REDIS_OP_TIMEOUT_MS, 'dashboardSet');
+    } catch (e) {
+        disableRedis(e.message || String(e));
+    }
 }
 
 async function invalidateDashboardCache(keySuffixOrPattern) {
@@ -178,12 +242,14 @@ async function invalidateDashboardCache(keySuffixOrPattern) {
             ? keySuffixOrPattern
             : DASHBOARD_CACHE_PREFIX + keySuffixOrPattern;
         if (key.includes('*')) {
-            const keys = await c.keys(key);
-            if (keys.length > 0) await c.del(...keys);
+            const keys = await withTimeout(c.keys(key), REDIS_OP_TIMEOUT_MS, 'dashboardKeys');
+            if (keys.length > 0) await withTimeout(c.del(...keys), REDIS_OP_TIMEOUT_MS, 'dashboardDel');
         } else {
-            await c.del(key);
+            await withTimeout(c.del(key), REDIS_OP_TIMEOUT_MS, 'dashboardDel');
         }
-    } catch (_) {}
+    } catch (e) {
+        disableRedis(e.message || String(e));
+    }
 }
 
 /** Call when metrics are updated (sale/return/repair/void/edit). INCR version so cached responses are stale; no wildcard scan/delete. */

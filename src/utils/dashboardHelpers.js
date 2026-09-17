@@ -9,6 +9,18 @@ function can(user, key) {
   return user.permissionKeys && user.permissionKeys.has(key);
 }
 
+/** Normalize a location ref (ObjectId, populated doc, or string) to an id string. */
+function getLocationIdString(locationId) {
+  if (locationId == null) return null;
+  if (typeof locationId === 'object' && locationId._id != null) {
+    return String(locationId._id);
+  }
+  if (typeof locationId === 'object' && locationId.constructor?.name === 'ObjectId' && typeof locationId.toString === 'function') {
+    return locationId.toString();
+  }
+  return String(locationId);
+}
+
 /**
  * User location scope for dashboard/reports. Admin sees all; others see assignedLocationIds merged with role locations.
  * @param {object} user - req.user (with role, assignedLocationIds, roles populated with assignedLocationIds)
@@ -80,4 +92,4 @@ function getDashboardPermissions(user) {
   };
 }
 
-module.exports = { can, getDashboardPermissions, getUserLocationScope };
+module.exports = { can, getDashboardPermissions, getUserLocationScope, getLocationIdString };

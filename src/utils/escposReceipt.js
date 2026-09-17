@@ -275,8 +275,16 @@ function summaryItemName(item) {
     return name.replace(new RegExp(`\\s*\\b${escaped}\\b\\s*`, 'gi'), ' ').replace(/\s+/g, ' ').trim() || name || '-';
 }
 
-function itemsSummaryLineWithGrade(item) {
-    const base = summaryItemName(item);
+function withCategorySuffix(base, category) {
+    const b = String(base || '').trim() || '-';
+    const cat = String(category || '').trim();
+    if (!cat) return b;
+    if (b.toUpperCase().includes(cat.toUpperCase())) return b;
+    return `${b} (${cat})`;
+}
+
+function itemsSummaryLineWithGrade(item, baseOverride) {
+    const base = (baseOverride != null ? String(baseOverride).trim() : summaryItemName(item)) || '-';
     const g = String(item.grade || '').trim();
     if (!g) return base || '-';
     const upper = base.toUpperCase();
@@ -313,11 +321,12 @@ function appendOrderedAttributes(baseLine, slugOrder, getValue) {
     return `${nm} - ${extra.join(' - ')}`;
 }
 
-function receiptItemDescriptionLine(item, slugOrder) {
-    const nm = summaryItemName(item).trim() || String(item.name || '').trim() || '-';
-    if (!slugOrder || !slugOrder.length) return itemsSummaryLineWithGrade(item);
+function receiptItemDescriptionLine(item, slugOrder, categoryName) {
+    const rawName = summaryItemName(item).trim() || String(item.name || '').trim() || '-';
+    const nm = withCategorySuffix(rawName, categoryName);
+    if (!slugOrder || !slugOrder.length) return itemsSummaryLineWithGrade(item, nm);
     const out = appendOrderedAttributes(nm, slugOrder, (slug) => saleItemValueForSlug(item, slug));
-    if (out === nm) return itemsSummaryLineWithGrade(item);
+    if (out === nm) return itemsSummaryLineWithGrade(item, nm);
     return out;
 }
 
@@ -325,9 +334,10 @@ function receiptItemDescriptionLine(item, slugOrder) {
  * @param {Object} sale - Sale document (lean): reference, type, items[], subtotal, tax, total, discount, customerName, payments, previousBalance, amountDue, createdAt
  * @param {Object} settings - { companyName, companyAddress, receiptTerms, salesPrint?, logoEscpos?: Buffer, qrEscpos?: Buffer }
  * @param {Record<string, string[]>} [variantAttributeSlugsOrderBySku] - SKU → slugs in category order (invoice PDF parity)
+ * @param {Record<string, string>} [categoryNameBySku] - SKU → inventory category name (receipt line items)
  * @returns {Buffer} raw ESC/POS bytes
  */
-function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}) {
+function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}, categoryNameBySku = {}) {
     const parts = [];
     const shopName =
         escposSafeText(
@@ -468,7 +478,8 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                 if (o.showLineItems === false) break;
                 (sale.items || []).forEach((item) => {
                     const slugOrder = item.sku ? variantAttributeSlugsOrderBySku[item.sku] : undefined;
-                    const desc = receiptItemDescriptionLine(item, slugOrder);
+                    const categoryName = item.sku ? categoryNameBySku[item.sku] : undefined;
+                    const desc = receiptItemDescriptionLine(item, slugOrder, categoryName);
                     parts.push(line(desc.slice(0, cols)));
                     if (o.showItemSerials !== false && item.serialNumbers && item.serialNumbers.length > 0) {
                         parts.push(line(`IMEI: ${item.serialNumbers.join(', ').slice(0, cols - 6)}`));

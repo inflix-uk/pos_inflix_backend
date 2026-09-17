@@ -24,6 +24,7 @@ const {
 } = require('./purchaseController');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
+const { enrichSaleItemsFromPurchase } = require('../utils/enrichSaleItemsFromPurchase');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const {
     canViewHistoricalSales,
@@ -38,7 +39,7 @@ const {
     computeWholesaleTotalOwing,
 } = require('../utils/wholesalePaymentAmounts');
 
-const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials'];
+const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials', 'purchases:stock-list'];
 async function invalidateSalesCaches(tenantId) {
     await cache.bumpMany(SALES_CACHE_NAMESPACES, tenantId);
     // Inventory products page reads from SWR caches in purchaseController; without these,
@@ -503,12 +504,10 @@ exports.getSales = asyncHandler(async (req, res) => {
     if (!searchStr && !includeItems) {
         salesQuery.select('-items');
     }
-    salesQuery.lean();
-
-    // Run count + find in parallel
+    // Run count + find in parallel (cap query time so a slow Redis/DB cannot hang the Sales page)
     const [total, sales] = await Promise.all([
-        Sale.countDocuments(query),
-        salesQuery
+        Sale.countDocuments(query).maxTimeMS(12000),
+        salesQuery.maxTimeMS(12000).lean().exec()
     ]);
 
     // Fetch return status in parallel for the page's sales (not sequentially after)
@@ -1365,6 +1364,10 @@ exports.createSale = asyncHandler(async (req, res) => {
         soldBy: req.user?.id
     };
 
+    // Rebuild incomplete line names / brandModel from the parcel that owns the IMEI
+    // (cart may still hold stale SerialIndex names after purchase model restore).
+    saleData.items = await enrichSaleItemsFromPurchase(saleData.items, tenantId);
+
     if (body.type === 'retail') {
         saleData.paymentMethod = body.paymentMethod || 'cash';
     } else {
@@ -1557,15 +1560,31 @@ exports.createSale = asyncHandler(async (req, res) => {
         res.setHeader('X-Server-Timing', timingHeader);
     }
 
-    const soldSerials = (saleData.items || []).flatMap((item) => (Array.isArray(item.serialNumbers) ? item.serialNumbers : []).map((s) => (s && String(s).trim()) || '').filter(Boolean));
-    for (const serial of soldSerials) {
-        serialIndexService.upsertSerialIndex(tenantId, {
-            serial,
-            status: 'sold',
-            saleId: sale._id,
-            saleReferenceSnapshot: refLabel || sale.reference || '',
-            customerNameSnapshot: (sale.customerName != null ? String(sale.customerName) : '') || '',
-        }).catch(() => {});
+    const soldSerials = [];
+    for (const item of saleData.items || []) {
+        const serials = Array.isArray(item.serialNumbers) ? item.serialNumbers : [];
+        for (const raw of serials) {
+            const serial = (raw && String(raw).trim()) || '';
+            if (!serial) continue;
+            soldSerials.push(serial);
+            serialIndexService.upsertSerialIndex(tenantId, {
+                serial,
+                status: 'sold',
+                saleId: sale._id,
+                saleReferenceSnapshot: refLabel || sale.reference || '',
+                customerNameSnapshot: (sale.customerName != null ? String(sale.customerName) : '') || '',
+                productNameSnapshot: item.name || undefined,
+                brand: item.brand || undefined,
+                brandModel: item.brandModel || undefined,
+                capacity: item.capacity || undefined,
+                colour: item.colour || undefined,
+                grade: item.grade || undefined,
+                purchaseId: item.purchaseId || undefined,
+                purchaseItemId: item.purchaseItemId || undefined,
+                unitCost: item.unit_cost_at_sale != null ? Number(item.unit_cost_at_sale) : undefined,
+                salePrice: item.price != null ? Number(item.price) : undefined,
+            }).catch(() => {});
+        }
     }
 
     // Sync StockItem (denormalized typeahead index): mark serial rows sold,
@@ -1677,25 +1696,40 @@ exports.getReturnLines = asyncHandler(async (req, res) => {
         ? await SalesReturn.find({ linkedInvoiceRef: reference, tenantId }).lean()
         : [];
 
+    const serialKey = (s) => String(s || '').trim().toUpperCase();
+    const returnedByName = {}; // product name -> { qty, serials }
     const returnedBySku = {}; // sku -> { qty, serials }
+    const returnedSerialSet = new Set();
     for (const ret of returnsForInvoice) {
         for (const it of ret.items || []) {
-            const key = (it.product || '').trim();
-            if (!key) continue;
-            if (!returnedBySku[key]) returnedBySku[key] = { qty: 0, serials: [] };
-            returnedBySku[key].qty += Math.max(0, Number(it.quantity) || 0);
-            const serials = Array.isArray(it.serialNumbers) ? it.serialNumbers : [];
-            returnedBySku[key].serials.push(...serials.filter(Boolean));
+            const nameKey = (it.product || '').trim();
+            const skuKey = (it.sku || '').trim();
+            const qty = Math.max(0, Number(it.quantity) || 0);
+            const serials = (Array.isArray(it.serialNumbers) ? it.serialNumbers : []).filter(Boolean);
+            serials.forEach((s) => returnedSerialSet.add(serialKey(s)));
+            if (nameKey) {
+                if (!returnedByName[nameKey]) returnedByName[nameKey] = { qty: 0, serials: [] };
+                returnedByName[nameKey].qty += qty;
+                returnedByName[nameKey].serials.push(...serials);
+            }
+            if (skuKey) {
+                if (!returnedBySku[skuKey]) returnedBySku[skuKey] = { qty: 0, serials: [] };
+                returnedBySku[skuKey].qty += qty;
+                returnedBySku[skuKey].serials.push(...serials);
+            }
         }
     }
 
     const lines = (sale.items || []).map((item, idx) => {
         const name = (item.name || '').trim();
+        const sku = (item.sku || '').trim();
         const qtyPurchased = Math.max(0, Number(item.quantity) || 0);
-        const ret = returnedBySku[name] || { qty: 0, serials: [] };
-        const qtyAlreadyReturned = ret.qty;
+        const ret = returnedBySku[sku] || returnedByName[name] || { qty: 0, serials: [] };
         const soldSerials = Array.isArray(item.serialNumbers) ? item.serialNumbers.filter(Boolean) : [];
-        const returnableSerials = soldSerials.filter((s) => !ret.serials.includes(s));
+        const returnableSerials = soldSerials.filter((s) => !returnedSerialSet.has(serialKey(s)));
+        const qtyAlreadyReturned = soldSerials.length > 0
+            ? Math.max(0, soldSerials.length - returnableSerials.length)
+            : ret.qty;
         const qtyReturnable = soldSerials.length > 0
             ? returnableSerials.length
             : Math.max(0, qtyPurchased - qtyAlreadyReturned);

@@ -13,26 +13,46 @@ function indexToApiStatus(status) {
     return status || 'not_found';
 }
 
+function productFromIndexDoc(doc) {
+    const brand = String(doc.brandSnapshot || '').trim();
+    const brandModel = String(doc.brandModelSnapshot || '').trim();
+    const capacity = String(doc.capacitySnapshot || '').trim();
+    const colour = String(doc.colourSnapshot || '').trim();
+    const grade = String(doc.gradeSnapshot || '').trim();
+    const composed = [brand, brandModel, capacity, colour].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const snapshot = String(doc.productNameSnapshot || '').trim();
+    // Prefer composed name when model is known — snapshot may be stale ("SAMSUNG 64GB GREY").
+    let name = snapshot;
+    if (brandModel && composed) {
+        const snapUp = snapshot.toUpperCase();
+        if (!snapshot || !snapUp.includes(brandModel.toUpperCase())) name = composed;
+        else name = snapshot;
+    } else if (!name && composed) {
+        name = composed;
+    }
+    return {
+        sku: doc.skuSnapshot || '',
+        name,
+        price: Number(doc.salePrice) || 0,
+        category: String(doc.categorySnapshot || '').trim() || 'Uncategorized',
+        brand,
+        serial: doc.serial,
+        grade,
+        colour,
+        brandModel,
+        capacity,
+        purchaseId: doc.purchaseId ? doc.purchaseId.toString() : '',
+        purchaseItemId: doc.purchaseItemId ? doc.purchaseItemId.toString() : '',
+        purchaseDate: doc.purchaseDate ? new Date(doc.purchaseDate).toISOString() : null,
+        unitCost: doc.unitCost != null ? Number(doc.unitCost) : null,
+    };
+}
+
 function indexDocToResult(doc) {
     const status = indexToApiStatus(doc.status);
     const result = { serial: doc.serial, status };
-    if (status === 'in_stock' && (doc.skuSnapshot || doc.productNameSnapshot != null)) {
-        result.product = {
-            sku: doc.skuSnapshot || '',
-            name: doc.productNameSnapshot || 'Product',
-            price: Number(doc.salePrice) || 0,
-            category: 'Uncategorized',
-            brand: '',
-            serial: doc.serial,
-            grade: '',
-            colour: '',
-            brandModel: '',
-            capacity: '',
-            purchaseId: doc.purchaseId ? doc.purchaseId.toString() : '',
-            purchaseItemId: doc.purchaseItemId ? doc.purchaseItemId.toString() : '',
-            purchaseDate: doc.purchaseDate ? new Date(doc.purchaseDate).toISOString() : null,
-            unitCost: doc.unitCost != null ? Number(doc.unitCost) : null
-        };
+    if (status === 'in_stock' && String(doc.productNameSnapshot || '').trim()) {
+        result.product = productFromIndexDoc(doc);
     }
     if (status === 'already_sold' && (doc.saleReferenceSnapshot || doc.customerNameSnapshot != null)) {
         result.soldInfo = {
@@ -41,6 +61,27 @@ function indexDocToResult(doc) {
         };
     }
     return result;
+}
+
+function variantSnapshotsFromProduct(product) {
+    if (!product) {
+        return {
+            gradeSnapshot: '',
+            colourSnapshot: '',
+            brandSnapshot: '',
+            brandModelSnapshot: '',
+            capacitySnapshot: '',
+            categorySnapshot: '',
+        };
+    }
+    return {
+        gradeSnapshot: product.grade != null ? String(product.grade).trim() : '',
+        colourSnapshot: product.colour != null ? String(product.colour).trim() : '',
+        brandSnapshot: product.brand != null ? String(product.brand).trim() : '',
+        brandModelSnapshot: product.brandModel != null ? String(product.brandModel).trim() : '',
+        capacitySnapshot: product.capacity != null ? String(product.capacity).trim() : '',
+        categorySnapshot: product.category != null ? String(product.category).trim() : '',
+    };
 }
 
 function toCacheValue(result) {
@@ -85,7 +126,9 @@ async function lookupSerials(tenantId, serials) {
     let dbTimeMs = 0;
     if (missSerials.length > 0) {
         const tDb = Date.now();
-        const docs = await SerialIndex.find({ tenantId: tenant, serial: { $in: missSerials } }).lean();
+        const docs = await SerialIndex.find({ tenantId: tenant, serial: { $in: missSerials } })
+            .maxTimeMS(8000)
+            .lean();
         dbTimeMs = Date.now() - tDb;
         const bySerial = {};
         docs.forEach((d) => { bySerial[d.serial] = d; });
@@ -138,43 +181,61 @@ async function upsertSerialIndex(tenantId, payload) {
     const serial = normalizeSerial(payload.serial);
     if (!serial) return;
     const status = payload.status || 'not_found';
-    const doc = {
+    const $set = {
         tenantId: tenant,
         serial,
         status,
-        productId: payload.productId ?? null,
-        productNameSnapshot: payload.productNameSnapshot ?? '',
-        skuSnapshot: payload.skuSnapshot ?? '',
-        purchaseId: payload.purchaseId ?? null,
-        purchaseItemId: payload.purchaseItemId ?? null,
-        unitCost: payload.unitCost ?? null,
-        salePrice: payload.salePrice ?? null,
-        locationId: payload.locationId ?? null,
-        saleId: payload.saleId ?? null,
-        saleReferenceSnapshot: payload.saleReferenceSnapshot ?? '',
-        customerNameSnapshot: payload.customerNameSnapshot ?? '',
-        purchaseDate: payload.purchaseDate ? new Date(payload.purchaseDate) : null,
         updatedAt: new Date(),
     };
-    await SerialIndex.findOneAndUpdate(
+    // Only overwrite product/inventory snapshots when the caller provides them.
+    // Sale "mark sold" must not wipe brandModel/productName from the index.
+    const setIfDefined = (key, value) => {
+        if (value !== undefined) $set[key] = value;
+    };
+    setIfDefined('productId', payload.productId);
+    setIfDefined('productNameSnapshot', payload.productNameSnapshot);
+    setIfDefined('skuSnapshot', payload.skuSnapshot);
+    if (payload.gradeSnapshot !== undefined || payload.grade !== undefined) {
+        $set.gradeSnapshot = payload.gradeSnapshot ?? payload.grade ?? '';
+    }
+    if (payload.colourSnapshot !== undefined || payload.colour !== undefined) {
+        $set.colourSnapshot = payload.colourSnapshot ?? payload.colour ?? '';
+    }
+    if (payload.brandSnapshot !== undefined || payload.brand !== undefined) {
+        $set.brandSnapshot = payload.brandSnapshot ?? payload.brand ?? '';
+    }
+    if (payload.brandModelSnapshot !== undefined || payload.brandModel !== undefined) {
+        $set.brandModelSnapshot = payload.brandModelSnapshot ?? payload.brandModel ?? '';
+    }
+    if (payload.capacitySnapshot !== undefined || payload.capacity !== undefined) {
+        $set.capacitySnapshot = payload.capacitySnapshot ?? payload.capacity ?? '';
+    }
+    if (payload.categorySnapshot !== undefined || payload.category !== undefined) {
+        $set.categorySnapshot = payload.categorySnapshot ?? payload.category ?? '';
+    }
+    setIfDefined('purchaseId', payload.purchaseId);
+    setIfDefined('purchaseItemId', payload.purchaseItemId);
+    setIfDefined('unitCost', payload.unitCost);
+    setIfDefined('salePrice', payload.salePrice);
+    setIfDefined('locationId', payload.locationId);
+    setIfDefined('saleId', payload.saleId);
+    setIfDefined('saleReferenceSnapshot', payload.saleReferenceSnapshot);
+    setIfDefined('customerNameSnapshot', payload.customerNameSnapshot);
+    if (payload.purchaseDate !== undefined) {
+        $set.purchaseDate = payload.purchaseDate ? new Date(payload.purchaseDate) : null;
+    }
+
+    const saved = await SerialIndex.findOneAndUpdate(
         { tenantId: tenant, serial },
-        { $set: doc },
+        { $set },
         { upsert: true, new: true }
-    );
+    ).lean();
+
+    const doc = saved || $set;
     const apiStatus = status === 'sold' ? 'already_sold' : status;
     const cacheVal = { serial, status: apiStatus };
     if (apiStatus === 'in_stock' && (doc.skuSnapshot || doc.productNameSnapshot)) {
-        cacheVal.product = {
-            sku: doc.skuSnapshot,
-            name: doc.productNameSnapshot,
-            price: doc.salePrice ?? 0,
-            category: 'Uncategorized',
-            brand: '',
-            serial,
-            purchaseId: doc.purchaseId ? doc.purchaseId.toString() : '',
-            purchaseItemId: doc.purchaseItemId ? doc.purchaseItemId.toString() : '',
-            purchaseDate: doc.purchaseDate ? new Date(doc.purchaseDate).toISOString() : null,
-        };
+        cacheVal.product = productFromIndexDoc({ ...doc, serial });
     }
     if (apiStatus === 'already_sold' && (doc.saleReferenceSnapshot || doc.customerNameSnapshot != null)) {
         cacheVal.soldInfo = { reference: doc.saleReferenceSnapshot, customerName: doc.customerNameSnapshot };
@@ -196,6 +257,7 @@ async function upsertFromResult(tenantId, result) {
         status,
         productNameSnapshot: result.product?.name ?? '',
         skuSnapshot: result.product?.sku ?? '',
+        ...variantSnapshotsFromProduct(result.product),
         salePrice: result.product?.price ?? null,
         saleReferenceSnapshot: result.soldInfo?.reference ?? '',
         customerNameSnapshot: result.soldInfo?.customerName ?? '',

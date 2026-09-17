@@ -5,6 +5,17 @@ const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
+const SMTP_TEST_DEADLINE_MS = 8000;
+
+function withDeadline(promise, ms, timeoutMessage) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(timeoutMessage)), ms);
+        }),
+    ]);
+}
+
 const EMAIL_SETTINGS_NS = 'settings:email';
 async function invalidateEmailSettingsCache(tenantId) {
     await cache.bumpNs(EMAIL_SETTINGS_NS, tenantId);
@@ -193,39 +204,86 @@ exports.deleteEmailSettings = asyncHandler(async (req, res) => {
     });
 });
 
+// @desc    Get SMTP credentials (unmasked) for server-side mail send
+// @route   GET /api/settings/email/smtp-secrets
+// @access  Private/settings.edit
+exports.getEmailSmtpSecrets = asyncHandler(async (req, res) => {
+    const settings = await EmailSettings.findOne();
+    if (!settings) {
+        return res.status(404).json({
+            success: false,
+            message: 'Email settings not found. Save your SMTP settings first.',
+        });
+    }
+    res.status(200).json({
+        success: true,
+        data: settings.toObject(),
+    });
+});
+
 // @desc    Test email settings
 // @route   POST /api/settings/email/test
 // @access  Private/Admin/Manager
 exports.testEmailSettings = asyncHandler(async (req, res) => {
-    const settings = await EmailSettings.findOne();
+    const stored = await EmailSettings.findOne();
 
-    if (!settings) {
+    if (!stored) {
         return res.status(404).json({
             success: false,
-            message: 'Email settings not found. Please configure email settings first.'
+            message: 'Email settings not found. Please configure email settings first.',
         });
     }
 
     const { testEmail } = req.body;
+    const body = req.body || {};
 
     if (!testEmail) {
         return res.status(400).json({
             success: false,
-            message: 'Test email address is required'
+            message: 'Test email address is required',
         });
     }
 
+    // Use current form values when provided so Test works before Save (password kept from DB if masked).
+    const settings = stored.toObject();
+    const mergeFields = [
+        'smtpHost', 'smtpPort', 'smtpSecure', 'smtpUsername',
+        'fromEmail', 'fromName', 'replyToEmail', 'replyToName',
+    ];
+    for (const key of mergeFields) {
+        if (body[key] != null && String(body[key]).trim() !== '') {
+            settings[key] = body[key];
+        }
+    }
+    if (body.smtpPort != null && String(body.smtpPort).trim() !== '') {
+        settings.smtpPort = Number(body.smtpPort);
+    }
+    if (body.smtpPassword && String(body.smtpPassword).trim() && body.smtpPassword !== '********') {
+        settings.smtpPassword = body.smtpPassword;
+    }
+    settings.smtpSecure = emailService.normalizeSmtpSecure(settings.smtpPort, settings.smtpSecure);
+
+    const host = settings.smtpHost || 'smtp';
+    const port = Number(settings.smtpPort) || 587;
+    const timeoutMessage =
+        `Mail server timed out (${host}:${port}). Check host/port, encryption (SSL on 465, TLS on 587), and that outbound SMTP is allowed from your server.`;
+
     try {
-        await emailService.sendTestEmail(settings, testEmail);
+        await withDeadline(
+            emailService.sendTestEmail(settings, testEmail),
+            SMTP_TEST_DEADLINE_MS,
+            timeoutMessage
+        );
     } catch (err) {
+        const message = err && err.message ? String(err.message) : 'Failed to send test email';
         return res.status(502).json({
             success: false,
-            message: err.message || 'Failed to send test email'
+            message,
         });
     }
 
     res.status(200).json({
         success: true,
-        message: `Test email sent to ${testEmail}`
+        message: `Test email sent to ${testEmail}`,
     });
 });

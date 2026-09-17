@@ -113,7 +113,7 @@ exports.createPurchaseReturn = asyncHandler(async (req, res) => {
             req.body,
             { actorName: req.user && req.user.name ? String(req.user.name) : '', req, tenantId }
         );
-        await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'paymentAccounts:list'], tenantId);
+        await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
         return res.status(201).json({ success: true, data });
     } catch (err) {
         if (err.message && (err.message.includes('not found') || err.message.includes('required') || err.message.includes('Invalid'))) {
@@ -231,7 +231,7 @@ exports.receiveRepair = asyncHandler(async (req, res) => {
         .populate('createdBy', 'name')
         .lean();
 
-    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
 
     res.status(200).json({
         success: true,
@@ -266,7 +266,7 @@ exports.updatePurchaseReturn = asyncHandler(async (req, res) => {
         .populate('createdBy', 'name')
         .lean();
 
-    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
 
     res.status(200).json({ success: true, data: populated });
 });
@@ -280,6 +280,6 @@ exports.deletePurchaseReturn = asyncHandler(async (req, res) => {
         return res.status(404).json({ success: false, message: 'Purchase return not found' });
     }
     await doc.deleteOne();
-    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'paymentAccounts:list'], tenantId);
+    await cache.bumpMany(['purchaseReturns:list', 'purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     res.status(200).json({ success: true, message: 'Purchase return deleted' });
 });

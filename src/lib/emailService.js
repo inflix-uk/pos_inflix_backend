@@ -1,24 +1,103 @@
 const nodemailer = require('nodemailer');
+const net = require('net');
+const tls = require('tls');
 const EmailSettings = require('../models/EmailSettings');
 
-function transportOptionsFromSettings(settings) {
+function formatSmtpError(err, settings) {
+    const host = settings?.smtpHost || 'smtp';
+    const port = Number(settings?.smtpPort) || 587;
+    const parts = [];
+    if (err?.code) parts.push(String(err.code));
+    if (err?.response) parts.push(String(err.response).trim());
+    const detail = parts.join(' — ') || (err?.message ? String(err.message) : 'Failed to send email');
+    if (/timeout|etimedout/i.test(detail)) {
+        return `Mail server timed out (${host}:${port}). Check host/port, encryption (SSL on 465, TLS on 587), and that outbound SMTP is allowed from your server.`;
+    }
+    if (/econnrefused|enotfound|edns|getaddrinfo/i.test(detail)) {
+        return `Cannot reach mail server (${host}:${port}): ${detail}`;
+    }
+    if (/certificate|self signed|unable to verify/i.test(detail)) {
+        return `TLS certificate error (${host}:${port}): ${detail}. Try port 587 with TLS, or ask your host to fix the mail certificate.`;
+    }
+    if (/auth|invalid login|535|534/i.test(detail)) {
+        return `SMTP login failed for ${settings?.smtpUsername || 'user'}@${host}: ${detail}. Check username and password (use an app password if required).`;
+    }
+    return `Mail server error (${host}:${port}): ${detail}`;
+}
+
+function normalizeSmtpSecure(port, mode) {
+    const p = Number(port) || 587;
+    const m = String(mode || 'tls').toLowerCase();
+    // cPanel-style mail: 465 = implicit SSL, 587 = STARTTLS (TLS).
+    if (p === 465) return 'ssl';
+    if (p === 587 || p === 2525) return m === 'ssl' ? 'tls' : (m === 'none' ? 'tls' : m);
+    return m;
+}
+
+function transportOptionsFromSettings(settings, { fastFail = false } = {}) {
     const port = Number(settings.smtpPort) || 587;
-    const mode = settings.smtpSecure || 'tls';
-    // Port 465 uses implicit TLS (SSL) even when the UI says "TLS".
-    const secure = mode === 'ssl' || port === 465;
+    const mode = normalizeSmtpSecure(port, settings.smtpSecure || 'tls');
+    // Port 465 uses implicit TLS (SSL). Port 587 uses STARTTLS (secure: false + requireTLS).
+    const secure = mode === 'ssl';
+    const host = String(settings.smtpHost || '').trim();
+    const rejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== '0';
     const opts = {
-        host: settings.smtpHost,
+        host,
         port,
         secure,
         auth: {
             user: settings.smtpUsername,
             pass: settings.smtpPassword,
         },
+        connectionTimeout: fastFail ? 5000 : 20000,
+        greetingTimeout: fastFail ? 5000 : 20000,
+        socketTimeout: fastFail ? 8000 : 60000,
+        tls: {
+            servername: host,
+            minVersion: 'TLSv1.2',
+            rejectUnauthorized,
+        },
     };
     if (mode === 'tls' && !secure) {
         opts.requireTLS = true;
     }
     return opts;
+}
+
+function probeSmtpReachability(settings, timeoutMs = 6000) {
+    const port = Number(settings.smtpPort) || 587;
+    const mode = normalizeSmtpSecure(port, settings.smtpSecure || 'tls');
+    const secure = mode === 'ssl';
+    const host = String(settings.smtpHost || '').trim();
+    const rejectUnauthorized = process.env.SMTP_TLS_REJECT_UNAUTHORIZED !== '0';
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let socket;
+
+        const finish = (err) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try {
+                socket?.destroy();
+            } catch (_) { /* ignore */ }
+            if (err) reject(err);
+            else resolve();
+        };
+
+        const timer = setTimeout(() => finish(new Error('ETIMEDOUT')), timeoutMs);
+
+        if (secure) {
+            socket = tls.connect(
+                { host, port, servername: host, rejectUnauthorized },
+                () => finish()
+            );
+        } else {
+            socket = net.connect({ host, port }, () => finish());
+        }
+        socket.on('error', (err) => finish(err));
+    });
 }
 
 function formatFrom(settings) {
@@ -38,6 +117,9 @@ async function getEmailSettings() {
 }
 
 async function sendMail(settings, { to, subject, text, html, attachments }) {
+    if (!settings?.smtpHost || !settings?.smtpUsername || !settings?.fromEmail) {
+        throw new Error('Email is not configured. Go to Settings → Email and save your SMTP settings.');
+    }
     const transporter = nodemailer.createTransport(transportOptionsFromSettings(settings));
     const mailOptions = {
         from: formatFrom(settings),
@@ -51,16 +133,45 @@ async function sendMail(settings, { to, subject, text, html, attachments }) {
     if (replyTo) {
         mailOptions.replyTo = replyTo;
     }
-    return transporter.sendMail(mailOptions);
+    try {
+        return await transporter.sendMail(mailOptions);
+    } catch (err) {
+        throw new Error(formatSmtpError(err, settings));
+    }
 }
 
 async function sendTestEmail(settings, testEmail) {
-    return sendMail(settings, {
+    if (!settings?.smtpHost || !settings?.smtpUsername || !settings?.fromEmail) {
+        throw new Error('Email is not configured. Go to Settings → Email and save your SMTP settings.');
+    }
+
+    try {
+        await probeSmtpReachability(settings, 6000);
+    } catch (err) {
+        throw new Error(formatSmtpError(err, settings));
+    }
+
+    const transporter = nodemailer.createTransport(
+        transportOptionsFromSettings(settings, { fastFail: true })
+    );
+    const mailOptions = {
+        from: formatFrom(settings),
         to: testEmail,
         subject: 'Test Email from POS Inflix',
         text: 'This is a test email to verify your email settings are working correctly.',
         html: '<p>This is a test email to verify your email settings are working correctly.</p>',
-    });
+    };
+    const replyTo = formatReplyTo(settings);
+    if (replyTo) {
+        mailOptions.replyTo = replyTo;
+    }
+    try {
+        return await transporter.sendMail(mailOptions);
+    } catch (err) {
+        throw new Error(formatSmtpError(err, settings));
+    } finally {
+        transporter.close();
+    }
 }
 
 async function sendWithPdfAttachment(settings, { to, subject, text, html, pdfBuffer, filename }) {
@@ -80,6 +191,7 @@ async function sendWithPdfAttachment(settings, { to, subject, text, html, pdfBuf
 }
 
 module.exports = {
+    normalizeSmtpSecure,
     transportOptionsFromSettings,
     sendMail,
     sendTestEmail,

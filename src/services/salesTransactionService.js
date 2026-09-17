@@ -587,16 +587,41 @@ async function createSaleInTransaction(session, saleData, options = {}) {
         }
     }
     if (soldSerialDocs.length > 0) {
-        await SoldSerial.insertMany(soldSerialDocs, { session });
         const customerName = (sale.customerName != null && sale.customerName !== '') ? String(sale.customerName).trim() : '';
-        const historyDocs = soldSerialDocs.map((d) => ({
-            serialNumber: d.serialNumber,
-            eventType: 'sold',
-            referenceType: 'Sale',
-            referenceId: sale._id,
-            referenceLabel: refLabel,
-            customerName
-        }));
+        const historyDocs = [];
+        const toInsert = [];
+        for (const doc of soldSerialDocs) {
+            const updated = await SoldSerial.findOneAndUpdate(
+                {
+                    serialNumber: doc.serialNumber,
+                    status: 'returned',
+                    returnDestination: { $ne: 'return_to_supplier' },
+                },
+                {
+                    $set: {
+                        status: 'sold',
+                        saleId: doc.saleId,
+                        soldAt: doc.soldAt,
+                        returnDestination: null,
+                        returnedAt: null,
+                        salesReturnId: null,
+                    },
+                },
+                { session, new: true }
+            );
+            if (!updated) toInsert.push(doc);
+            historyDocs.push({
+                serialNumber: doc.serialNumber,
+                eventType: 'sold',
+                referenceType: 'Sale',
+                referenceId: sale._id,
+                referenceLabel: refLabel,
+                customerName
+            });
+        }
+        if (toInsert.length > 0) {
+            await SoldSerial.insertMany(toInsert, { session });
+        }
         await SerialHistory.insertMany(historyDocs, { session });
     }
     timing.soldSerialMs = Date.now() - t0;

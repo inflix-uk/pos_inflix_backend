@@ -4,7 +4,8 @@ const Customer = require('../models/Customer');
 const asyncHandler = require('../middleware/asyncHandler');
 const metricsService = require('../services/metricsService');
 const { getTenantIdFromReq } = require('../middleware/auth');
-const { getUserLocationScope } = require('../utils/dashboardHelpers');
+const { getUserLocationScope, getLocationIdString } = require('../utils/dashboardHelpers');
+const { paymentBreakdownFromMethod } = require('../utils/wholesalePaymentAmounts');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -269,8 +270,8 @@ exports.getRepair = asyncHandler(async (req, res) => {
     // Phase 3: Location-based access control - verify user can access this repair's location
     const userScope = getUserLocationScope(req.user);
     if (userScope && userScope.length > 0 && repair.locationId) {
-        const repairLocationId = repair.locationId.toString ? repair.locationId.toString() : String(repair.locationId);
-        if (!userScope.includes(repairLocationId)) {
+        const repairLocationId = getLocationIdString(repair.locationId);
+        if (repairLocationId && !userScope.includes(repairLocationId)) {
             return res.status(404).json({
                 success: false,
                 message: 'Repair not found'
@@ -443,8 +444,8 @@ exports.updateRepair = asyncHandler(async (req, res) => {
     // Phase 3: Location-based access control - verify user can access this repair's location
     const userScope = getUserLocationScope(req.user);
     if (userScope && userScope.length > 0 && repair.locationId) {
-        const repairLocationId = repair.locationId.toString ? repair.locationId.toString() : String(repair.locationId);
-        if (!userScope.includes(repairLocationId)) {
+        const repairLocationId = getLocationIdString(repair.locationId);
+        if (repairLocationId && !userScope.includes(repairLocationId)) {
             return res.status(404).json({
                 success: false,
                 message: 'Repair not found'
@@ -456,7 +457,7 @@ exports.updateRepair = asyncHandler(async (req, res) => {
     if (req.body.locationId !== undefined) {
         const newLocationId = req.body.locationId;
         if (userScope && userScope.length > 0 && newLocationId) {
-            const newLocationIdStr = newLocationId.toString ? newLocationId.toString() : String(newLocationId);
+            const newLocationIdStr = getLocationIdString(newLocationId);
             if (!userScope.includes(newLocationIdStr)) {
                 return res.status(403).json({
                     success: false,
@@ -525,8 +526,8 @@ exports.takePayment = asyncHandler(async (req, res) => {
     // Phase 3: Location-based access control - verify user can access this repair's location
     const userScope = getUserLocationScope(req.user);
     if (userScope && userScope.length > 0 && repair.locationId) {
-        const repairLocationId = repair.locationId.toString ? repair.locationId.toString() : String(repair.locationId);
-        if (!userScope.includes(repairLocationId)) {
+        const repairLocationId = getLocationIdString(repair.locationId);
+        if (repairLocationId && !userScope.includes(repairLocationId)) {
             return res.status(404).json({ success: false, message: 'Repair not found' });
         }
     }
@@ -565,6 +566,7 @@ exports.takePayment = asyncHandler(async (req, res) => {
         total: amount,
         discount: 0,
         paymentMethod,
+        payments: paymentBreakdownFromMethod(paymentMethod, amount),
         customerId: repair.customerId || undefined,
         customerName: repair.customerName || undefined,
         soldBy: req.user?._id
@@ -624,8 +626,8 @@ exports.deleteRepair = asyncHandler(async (req, res) => {
     // Phase 3: Location-based access control - verify user can access this repair's location
     const userScope = getUserLocationScope(req.user);
     if (userScope && userScope.length > 0 && repair.locationId) {
-        const repairLocationId = repair.locationId.toString ? repair.locationId.toString() : String(repair.locationId);
-        if (!userScope.includes(repairLocationId)) {
+        const repairLocationId = getLocationIdString(repair.locationId);
+        if (repairLocationId && !userScope.includes(repairLocationId)) {
             return res.status(404).json({
                 success: false,
                 message: 'Repair not found'

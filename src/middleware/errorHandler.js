@@ -37,6 +37,14 @@ const errorHandler = (err, req, res, next) => {
         error = { message, statusCode: 401 };
     }
 
+    // Body too large (e.g. invoice PDF base64 for email)
+    if (err.type === 'entity.too.large' || err.name === 'PayloadTooLargeError' || err.status === 413) {
+        error = {
+            message: 'Attachment is too large to email. Try a simpler invoice template, or contact support.',
+            statusCode: 413,
+        };
+    }
+
     res.status(error.statusCode || 500).json({
         success: false,
         message: error.message || 'Server Error',

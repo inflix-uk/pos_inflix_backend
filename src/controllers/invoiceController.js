@@ -23,9 +23,7 @@ const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
 const EmailSettings = require('../models/EmailSettings');
 const emailService = require('../lib/emailService');
-const whatsappSession = require('../services/whatsappSessionService');
-const whatsappQueue = require('../services/whatsappQueueService');
-const whatsappWorker = require('../services/whatsappQueueWorker');
+const { getLondonDateUtcBounds, applySalesDateRestriction } = require('../utils/salesDateAccess');
 
 function escapeRegex(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -76,15 +74,55 @@ const getInvoices = asyncHandler(async (req, res) => {
         query.$or = orClause;
     }
 
+    const dateRestriction = applySalesDateRestriction(req.user, {
+        from: req.query.from,
+        to: req.query.to,
+    });
+    let fromUtc;
+    let toUtc;
+    if (dateRestriction.restricted) {
+        fromUtc = dateRestriction.from;
+        toUtc = dateRestriction.to;
+    } else {
+        const fromQ = req.query.from && String(req.query.from).trim();
+        const toQ = req.query.to && String(req.query.to).trim();
+        if (fromQ || toQ) {
+            const bounds = getLondonDateUtcBounds(fromQ, toQ || fromQ);
+            fromUtc = bounds.fromUtc;
+            toUtc = bounds.toUtc;
+        }
+    }
+    if (fromUtc && toUtc) {
+        const dateClause = {
+            $or: [
+                { occurredAt: { $gte: fromUtc, $lte: toUtc } },
+                {
+                    $and: [
+                        { $or: [{ occurredAt: null }, { occurredAt: { $exists: false } }] },
+                        { createdAt: { $gte: fromUtc, $lte: toUtc } },
+                    ],
+                },
+            ],
+        };
+        if (!query.$and) query.$and = [];
+        query.$and.push(dateClause);
+    }
+
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const pageSize = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
 
+    // Sort by effective invoice date (occurredAt, else createdAt). Plain
+    // { occurredAt: -1 } pushes null occurredAt to the end, so recent invoices
+    // without occurredAt vanish from page 1 on wider ranges (e.g. 30 days).
     const [items, total] = await Promise.all([
-        Invoice.find(query)
-            .sort({ occurredAt: -1, createdAt: -1 })
-            .skip((pageNum - 1) * pageSize)
-            .limit(pageSize)
-            .lean(),
+        Invoice.aggregate([
+            { $match: query },
+            { $addFields: { _sortDate: { $ifNull: ['$occurredAt', '$createdAt'] } } },
+            { $sort: { _sortDate: -1, createdAt: -1, _id: -1 } },
+            { $skip: (pageNum - 1) * pageSize },
+            { $limit: pageSize },
+            { $project: { _sortDate: 0 } },
+        ]),
         Invoice.countDocuments(query),
     ]);
 
@@ -163,7 +201,7 @@ const createInvoice = asyncHandler(async (req, res) => {
                 bankAccount: body.bankAccount || '',
                 paymentMethod: body.paymentMethod,
                 soldBy: req.user ? req.user._id : null,
-                occurredAt: body.occurredAt ? new Date(body.occurredAt) : null,
+                occurredAt: body.occurredAt ? new Date(body.occurredAt) : new Date(),
                 locationId: body.locationId || null,
                 tenantId,
                 note: body.note || '',
@@ -449,8 +487,8 @@ const sendInvoiceByEmail = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'PDF attachment is required' });
     }
 
-    const settings = await EmailSettings.findOne();
-    if (!settings) {
+    const settings = await EmailSettings.getSettings();
+    if (!settings || !settings.smtpHost) {
         return res.status(503).json({
             success: false,
             message: 'Email is not configured. Go to Settings → Email and save your SMTP settings.',

@@ -26,6 +26,8 @@ const inventorySettingsRoutes = require('./inventorySettingsRoutes');
 const generalSettingsRoutes = require('./generalSettingsRoutes');
 const printingSettingsRoutes = require('./printingSettingsRoutes');
 const headerQuickActionsRoutes = require('./headerQuickActionsRoutes');
+const notebookRoutes = require('./notebookRoutes');
+const notesRoutes = require('./notesRoutes');
 const purchaseRoutes = require('./purchaseRoutes');
 const purchaseReturnRoutes = require('./purchaseReturnRoutes');
 const accountsRoutes = require('./accountsRoutes');
@@ -104,10 +106,9 @@ router.get('/', (req, res) => {
 // For protected routes, resolved tenant is used by getTenantIdFromReq and mismatch protection.
 router.use(resolveTenantFromHost);
 
-// POLICY A (Strict): For all tenant routes (except auth and platform), require tenant not suspended.
-// Runs protect then requireTenantActive so suspended tenants get 403 TENANT_SUSPENDED.
-// /api/auth and /api/platform are excluded; platform admins bypass inside requireTenantActive.
+// CORS preflight must not hit JWT auth (browser would show "Failed to fetch").
 function tenantActiveGate(req, res, next) {
+    if (req.method === 'OPTIONS') return next();
     const p = (req.path || '').replace(/^\/+/, '');
     if (p === '' || p === 'auth' || p.startsWith('auth/')) return next();
     if (p === 'platform' || p.startsWith('platform/')) return next();
@@ -145,6 +146,8 @@ router.use('/settings/general', generalSettingsRoutes);
 router.use('/settings/my-sales-mode', require('./userSalesModeRoutes'));
 router.use('/settings/printing', printingSettingsRoutes);
 router.use('/settings/header-quick-actions', headerQuickActionsRoutes);
+router.use('/notebooks', notebookRoutes);
+router.use('/notes', notesRoutes);
 router.use('/purchases', purchaseRoutes);
 router.use('/purchase-returns', purchaseReturnRoutes);
 router.use('/accounts', accountsRoutes);
@@ -154,6 +157,7 @@ router.use('/gift-cards', giftCardRoutes);
 router.use('/activity-log', activityLogRoutes);
 router.use('/admin', adminRoutes);
 router.use('/repairs', repairRoutes);
+router.use('/repair-problem-types', require('./repairProblemTypeRoutes'));
 router.use('/dashboard', dashboardRoutes);
 router.use('/expense-categories', expenseCategoryRoutes);
 router.use('/expenses', expenseRoutes);

@@ -11,13 +11,14 @@ const salesTransactionService = require('../services/salesTransactionService');
 const activityLogService = require('../services/activityLogService');
 const purchaseReturnService = require('../services/purchaseReturnService');
 const serialIndexService = require('../services/serialIndexService');
+const stockItemService = require('../services/stockItemService');
 const metricsService = require('../services/metricsService');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
-const SALES_RETURN_CACHE_NAMESPACES = ['salesReturns:list'];
+const SALES_RETURN_CACHE_NAMESPACES = ['salesReturns:list', 'purchases:stock-list'];
 async function invalidateSalesReturnCaches(tenantId) {
     await cache.bumpMany(SALES_RETURN_CACHE_NAMESPACES, tenantId);
     await cache.bumpNs('sales:list', tenantId);
@@ -238,12 +239,10 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'At least one item is required' });
     }
     if (body.returnType === 'refund') {
-        if (!body.refundAccountId) {
-            return res.status(400).json({ success: false, message: 'Refund requires a payment account (refundAccountId) to deduct from' });
-        }
         if (!body.refundMethod || !['cash', 'card', 'bank'].includes(body.refundMethod)) {
             return res.status(400).json({ success: false, message: 'Refund requires refundMethod: cash, card, or bank' });
         }
+        // Payment account pot is optional for all refund methods (cash / card / bank).
     }
 
     const auditCtx = activityLogService.contextFromReq(req);
@@ -300,11 +299,32 @@ exports.createSalesReturn = asyncHandler(async (req, res) => {
       doc.occurredAt || doc.createdAt
     ).catch(() => {});
 
+    const restockSerials = [];
     for (const it of doc.items || []) {
         const serials = Array.isArray(it.serialNumbers) ? it.serialNumbers.filter(Boolean) : [];
-        const status = it.returnDestination === 'return_to_supplier' ? 'returned_to_supplier' : 'in_stock';
-        for (const serial of serials) {
-            serialIndexService.upsertSerialIndex(tenantId, { serial, status }).catch(() => {});
+        if (it.returnDestination === 'restock') {
+            restockSerials.push(...serials);
+        } else if (it.returnDestination === 'return_to_supplier') {
+            for (const serial of serials) {
+                serialIndexService.upsertSerialIndex(tenantId, { serial, status: 'returned_to_supplier' }).catch(() => {});
+            }
+        }
+    }
+    if (restockSerials.length > 0) {
+        const normalized = [...new Set(restockSerials.map((s) => serialIndexService.normalizeSerial(s)).filter(Boolean))];
+        if (normalized.length > 0) {
+            const purchaseCtrl = require('./purchaseController');
+            try {
+                const legacyResults = await purchaseCtrl.legacyFindInStockSerials(normalized, tenantId);
+                for (const r of legacyResults) {
+                    serialIndexService.upsertFromResult(tenantId, r).catch(() => {});
+                }
+            } catch {
+                for (const s of normalized) {
+                    serialIndexService.invalidateSerial(tenantId, s).catch(() => {});
+                }
+            }
+            stockItemService.markInStock(normalized, tenantId).catch(() => {});
         }
     }
 

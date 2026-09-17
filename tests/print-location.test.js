@@ -193,6 +193,28 @@ describe('Receipt ESC/POS uses location header', () => {
     expect(str).toContain('GBP 10.00');
   });
 
+  it('includes category name next to line item when categoryNameBySku is provided', () => {
+    const sale = {
+      reference: 'INV-CAT',
+      type: 'retail',
+      paymentMethod: 'cash',
+      items: [{ sku: 'CASE-1', name: 'CLEAR CASE', price: 10, quantity: 1 }],
+      total: 10,
+      subtotal: 10,
+      tax: 0,
+      discount: 0,
+      createdAt: new Date()
+    };
+    const buffer = buildReceiptEscpos(
+      sale,
+      { companyName: 'Shop', companyAddress: '' },
+      {},
+      { 'CASE-1': 'Phone Accessories' }
+    );
+    const str = buffer.toString('utf8');
+    expect(str).toContain('CLEAR CASE (Phone Accessories)');
+  });
+
   it('uses full-width dividers for 80mm paper', () => {
     expect(lineCharsForPaper(80)).toBe(48);
     expect(dividerLine(48).length).toBe(48);
@@ -309,6 +331,7 @@ describe('getSalePrintContext', () => {
     expect(payload.data.location.name).toBe('Context Test Location');
     expect(payload.data.location.address).toBe('5 Print Ave');
     expect(payload.data.fallbackLabel).toBeNull();
+    expect(payload.data.categoryNameBySku).toBeDefined();
     await Sale.findByIdAndDelete(sale._id);
     await Location.findByIdAndDelete(loc._id);
   });
