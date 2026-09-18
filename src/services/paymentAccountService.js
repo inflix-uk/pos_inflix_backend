@@ -23,6 +23,23 @@ async function getDefaultPaymentAccountId(tenantId, type, locationId = null) {
   return acc ? acc._id : null;
 }
 
+/** Payment-account (pot) type that receives money for each payment method. */
+const METHOD_TO_ACCOUNT_TYPE = { cash: 'cash_drawer', card: 'card', bank: 'bank' };
+
+/**
+ * Default pot that receives money paid by `method` (cash/card/bank). Cash prefers the drawer of
+ * `locationId`, then the shared drawer. Returns null for methods that move no money (credit).
+ */
+async function getPaymentAccountIdForMethod(tenantId, method, locationId = null) {
+  const type = METHOD_TO_ACCOUNT_TYPE[method];
+  if (!type) return null;
+  if (type === 'cash_drawer' && locationId) {
+    const atLocation = await getDefaultPaymentAccountId(tenantId, type, locationId);
+    if (atLocation) return atLocation;
+  }
+  return getDefaultPaymentAccountId(tenantId, type, null);
+}
+
 /**
  * Get all active payment accounts for tenant (optionally scoped by location for cash_drawer).
  */
@@ -129,6 +146,7 @@ async function seedDefaultPaymentAccounts(tenantId) {
 
 module.exports = {
   getDefaultPaymentAccountId,
+  getPaymentAccountIdForMethod,
   getPaymentAccounts,
   getAccountBalances,
   seedDefaultPaymentAccounts,

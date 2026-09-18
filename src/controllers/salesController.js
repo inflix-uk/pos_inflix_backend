@@ -16,6 +16,7 @@ const activityLogService = require('../services/activityLogService');
 const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
 const metricsService = require('../services/metricsService');
+const paymentAccountService = require('../services/paymentAccountService');
 const {
     legacyFindInStockSerials,
     invalidateStockPurchasesCache,
@@ -1811,7 +1812,10 @@ exports.getFindBySerial = asyncHandler(async (req, res) => {
 
 // @desc    Take a follow-up partial payment against an existing sale.
 //          Bumps the matching `payments` bucket, lowers `amountDue`, appends to `paymentHistory`,
-//          and writes a payment-ledger entry so the customer statement stays in sync.
+//          and — for money actually received (cash/card/bank) — posts a customer ledger payment,
+//          lowers Customer.balance and writes a payment-pot IN entry, so the account statement,
+//          the next invoice's previous balance and takings all see the payment.
+//          "credit" moves no money (it settles the invoice from the account), so it only touches the sale.
 // @route   POST /api/sales/:id/take-payment
 // @access  Private (sale.edit)
 exports.takePayment = asyncHandler(async (req, res) => {
@@ -1855,6 +1859,17 @@ exports.takePayment = asyncHandler(async (req, res) => {
     const allowedMax = currentDue > 0 ? currentDue : Number.POSITIVE_INFINITY;
     const applied = Math.min(amount, allowedMax);
 
+    const movesMoney = method !== 'credit';
+    const userId = req.user?._id || req.user?.id || null;
+    const receivedAt = new Date();
+    const refLabel = sale.reference || `Sale ${sale._id}`;
+    const account = movesMoney && sale.type === 'wholesale' && sale.customerId
+        ? await resolveWholesaleSaleAccount(sale.customerId, tenantId)
+        : null;
+    const potAccountId = movesMoney
+        ? await paymentAccountService.getPaymentAccountIdForMethod(tenantId, method, sale.locationId)
+        : null;
+
     // Update payment bucket and lower the balance.
     sale.payments = sale.payments || {};
     sale.payments[method] = round2((Number(sale.payments[method]) || 0) + applied);
@@ -1866,12 +1881,49 @@ exports.takePayment = asyncHandler(async (req, res) => {
         amount: applied,
         method,
         note,
-        receivedBy: req.user?._id || null,
-        receivedAt: new Date()
+        receivedBy: userId,
+        receivedAt
     });
-    await sale.save();
+
+    await transactionService.runWithTransaction(async (session) => {
+        await sale.save({ session });
+        if (account?.hasCustomerLedger) {
+            await LedgerEntry.create([{
+                accountType: 'customer',
+                accountId: account.id,
+                accountModel: 'Customer',
+                type: 'payment_in',
+                amount: round2(-applied),
+                referenceId: sale._id,
+                referenceLabel: `${refLabel} payment`,
+                date: receivedAt,
+                occurredAt: receivedAt,
+                paymentMethod: method,
+                note,
+                createdBy: userId
+            }], { session });
+            await Customer.findByIdAndUpdate(account.id, { $inc: { balance: round2(-applied) } }, { session });
+        }
+        if (potAccountId) {
+            await PaymentLedgerEntry.create([{
+                tenantId,
+                occurredAtUtc: receivedAt,
+                accountId: potAccountId,
+                method,
+                direction: 'in',
+                amount: applied,
+                entityType: 'Sale',
+                entityId: sale._id,
+                locationId: sale.locationId || undefined,
+                createdByUserId: userId || undefined
+            }], { session });
+        }
+    });
 
     await invalidateSalesCaches(tenantId);
+    await cache.bumpNs('paymentAccounts:list', tenantId);
+    await cache.bumpNs('customers:list', tenantId);
+    await cache.bumpMany(['accounts:list', 'accounts:statement'], tenantId);
 
     res.status(200).json({
         success: true,
