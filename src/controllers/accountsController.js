@@ -22,6 +22,7 @@ const {
 } = require('../utils/salesDateAccess');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const { parseStatementRange, dateMatchForRange, buildStatementRows } = require('../utils/accountStatement');
 
 const ACCOUNTS_CACHE_NAMESPACES = ['accounts:list', 'accounts:statement'];
 async function invalidateAccountsCaches(tenantId) {
@@ -336,90 +337,33 @@ exports.deleteLedgerEntry = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getCustomerStatement = asyncHandler(async (req, res) => {
     const customerId = req.params.id;
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
+    const range = parseStatementRange(req.query);
 
-    const match = { accountType: 'customer', accountId: customerId, deletedAt: null };
-    if (from && to) match.date = { $gte: from, $lte: to };
-    else if (from) match.date = { $gte: from };
-    else if (to) match.date = { $lte: to };
+    const base = { accountType: 'customer', accountId: customerId, deletedAt: null };
+    const dateMatch = dateMatchForRange(range);
 
-    // Run customer lookup and ledger query in parallel
-    const [customer, entries] = await Promise.all([
+    const [customer, entries, priorEntries] = await Promise.all([
         Customer.findById(customerId).select('name balance').lean(),
-        LedgerEntry.find(match).sort({ date: -1 }).lean()
+        LedgerEntry.find(dateMatch ? { ...base, date: dateMatch } : base).lean(),
+        range.from
+            ? LedgerEntry.find({ ...base, date: { $lt: range.from } }).select('amount').lean()
+            : Promise.resolve([])
     ]);
 
     if (!customer) {
         return res.status(404).json({ success: false, message: 'Customer not found' });
     }
-    // Ensure balance is a number (imported balance lives on Customer when ledger may not have opening_balance yet)
-    if (customer.balance != null && typeof customer.balance !== 'number') {
-        customer.balance = round2(Number(customer.balance));
-    }
 
-    // Aggregate sale entries by referenceId so one line per invoice (no duplicate rows for same sale/edit)
-    const saleEntries = entries.filter((e) => e.type === 'sale' && e.referenceId);
-    const otherEntries = entries.filter((e) => e.type !== 'sale' || !e.referenceId);
-    const saleByRef = new Map();
-    saleEntries.forEach((e) => {
-        const ref = String(e.referenceId);
-        if (!saleByRef.has(ref)) {
-            saleByRef.set(ref, { _id: e._id, type: 'sale', amount: 0, referenceLabel: e.referenceLabel, date: e.date, referenceId: ref });
-        }
-        const row = saleByRef.get(ref);
-        row.amount = round2((row.amount || 0) + (Number(e.amount) || 0));
-        if (new Date(e.date) < new Date(row.date)) row.date = e.date;
-    });
-    const aggregatedSales = Array.from(saleByRef.values());
-
-    // Which sales have been edited (updatedAt > createdAt)
-    const saleRefIds = aggregatedSales.map((s) => s.referenceId);
-    let editedSaleIds = new Set();
-    if (saleRefIds.length > 0) {
-        const sales = await Sale.find({ _id: { $in: saleRefIds } }).select('_id updatedAt createdAt').lean();
-        const EDIT_THRESHOLD_MS = 5000;
-        sales.forEach((s) => {
-            const created = new Date(s.createdAt).getTime();
-            const updated = new Date(s.updatedAt).getTime();
-            if (updated - created > EDIT_THRESHOLD_MS) editedSaleIds.add(String(s._id));
-        });
-    }
-
-    const saleLines = aggregatedSales.map((s) => ({
-        _id: s._id,
-        type: s.type,
-        amount: round2(s.amount),
-        referenceLabel: s.referenceLabel,
-        date: s.date,
-        paymentMethod: undefined,
-        note: undefined,
-        isEdited: editedSaleIds.has(s.referenceId)
-    }));
-    const otherLines = otherEntries.map((e) => ({
-        _id: e._id,
-        type: e.type,
-        amount: round2(e.amount),
-        referenceLabel: e.referenceLabel,
-        date: e.date,
-        paymentMethod: e.paymentMethod,
-        note: e.note,
-        isEdited: false
-    }));
-    let balance = round2(entries.reduce((sum, e) => sum + (e.amount || 0), 0));
+    // Imported customers can carry a balance on the Customer doc with no ledger yet: when the
+    // full history is empty, write it as an opening_balance entry so the statement reflects it.
+    // Only when there are no entries at all — otherwise customer.balance already reflects the
+    // existing transactions and an opening entry would double-count them.
     const customerBalance = round2(Number(customer.balance) || 0);
-    const hasOpeningInLedger = entries.some((e) => e.type === 'opening_balance');
-    const noDateFilter = !from && !to;
-    let lines = [...saleLines, ...otherLines];
-    const startOfToday = new Date();
-    startOfToday.setUTCHours(0, 0, 0, 0);
-    // When no date filter, no ledger entries exist, and the customer has an imported balance:
-    // backfill an opening_balance ledger entry so the statement reflects it.
-    // Only do this when entries.length === 0 — otherwise customer.balance already reflects
-    // the existing transactions and creating an opening would double-count them.
-    if (noDateFilter && customerBalance !== 0 && entries.length === 0) {
+    if (!dateMatch && customerBalance !== 0 && entries.length === 0) {
+        const startOfToday = new Date();
+        startOfToday.setUTCHours(0, 0, 0, 0);
         try {
-            await LedgerEntry.create({
+            const opening = await LedgerEntry.create({
                 accountType: 'customer',
                 accountId: customerId,
                 accountModel: 'Customer',
@@ -429,23 +373,22 @@ exports.getCustomerStatement = asyncHandler(async (req, res) => {
                 date: startOfToday,
                 createdBy: req.user?.id
             });
+            entries.push(opening.toObject());
         } catch (err) {
             // ignore duplicate or validation errors
         }
-        balance = customerBalance;
-        lines = [
-            { _id: 'opening', type: 'opening_balance', amount: customerBalance, referenceLabel: 'Balance brought forward', date: startOfToday, paymentMethod: undefined, note: undefined, isEdited: false },
-            ...lines
-        ];
     }
-    lines.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    const openingBalance = round2(priorEntries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
+    const statement = buildStatementRows(entries, openingBalance, 'debit');
 
     res.status(200).json({
         success: true,
         data: {
             customer: { _id: customer._id, name: customer.name },
-            balance,
-            lines
+            balance: statement.closingBalance,
+            ...statement,
+            period: { from: range.from, to: range.to }
         }
     });
 });
@@ -594,36 +537,26 @@ exports.recordSupplierPayment = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getSupplierStatement = asyncHandler(async (req, res) => {
     const supplierId = req.params.id;
-    const from = req.query.from ? new Date(req.query.from) : null;
-    const to = req.query.to ? new Date(req.query.to) : null;
+    const range = parseStatementRange(req.query);
 
-    const match = { accountType: 'supplier', accountId: supplierId, deletedAt: null };
-    if (from && to) match.date = { $gte: from, $lte: to };
-    else if (from) match.date = { $gte: from };
-    else if (to) match.date = { $lte: to };
+    const base = { accountType: 'supplier', accountId: supplierId, deletedAt: null };
+    const dateMatch = dateMatchForRange(range);
 
-    // Run supplier lookup and ledger query in parallel
-    const [supplier, entries] = await Promise.all([
+    const [supplier, entries, priorEntries] = await Promise.all([
         Supplier.findById(supplierId).select('name contactPerson').lean(),
-        LedgerEntry.find(match).sort({ date: -1 }).lean()
+        LedgerEntry.find(dateMatch ? { ...base, date: dateMatch } : base).lean(),
+        range.from
+            ? LedgerEntry.find({ ...base, date: { $lt: range.from } }).select('amount').lean()
+            : Promise.resolve([])
     ]);
 
     if (!supplier) {
         return res.status(404).json({ success: false, message: 'Supplier not found' });
     }
 
-    const lines = entries.map((e) => ({
-        _id: e._id,
-        type: e.type,
-        amount: round2(e.amount),
-        referenceLabel: e.referenceLabel,
-        referenceId: e.referenceId,
-        date: e.date,
-        paymentMethod: e.paymentMethod,
-        note: e.note
-    }));
-
-    const balance = round2(entries.reduce((sum, e) => sum + (e.amount || 0), 0));
+    const openingBalance = round2(priorEntries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
+    // Supplier view: purchases (what we owe) are credits, payments to them are debits.
+    const statement = buildStatementRows(entries, openingBalance, 'credit');
 
     res.status(200).json({
         success: true,
@@ -634,8 +567,9 @@ exports.getSupplierStatement = asyncHandler(async (req, res) => {
                 contactPerson: supplier.contactPerson || '',
                 displayLabel: formatSupplierLabel(supplier),
             },
-            balance,
-            lines
+            balance: statement.closingBalance,
+            ...statement,
+            period: { from: range.from, to: range.to }
         }
     });
 });
