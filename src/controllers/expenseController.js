@@ -50,6 +50,7 @@ exports.list = asyncHandler(async (req, res) => {
         createdByUserId: req.query.createdByUserId || null,
         approvedByUserId: req.query.approvedByUserId || null,
         costCentre: req.query.costCentre || null,
+        locationId: req.query.locationId || null,
         search: (req.query.search && req.query.search.trim()) || null
     };
 
@@ -64,6 +65,11 @@ exports.list = asyncHandler(async (req, res) => {
             if (req.query.categoryId) filter.categoryId = req.query.categoryId;
             if (req.query.status) filter.status = req.query.status;
             if (req.query.paymentMethod) filter.paymentMethod = req.query.paymentMethod;
+            // 'all' (or absent) = every shop plus company-wide; otherwise just that shop.
+            const locationIdParam = String(req.query.locationId || '').trim();
+            if (locationIdParam && locationIdParam.toLowerCase() !== 'all') {
+                filter.locationId = locationIdParam;
+            }
             if (req.query.createdByUserId) filter.createdByUserId = req.query.createdByUserId;
             if (req.query.approvedByUserId) filter.approvedByUserId = req.query.approvedByUserId;
             if (req.query.costCentre) {
@@ -156,7 +162,7 @@ exports.update = asyncHandler(async (req, res) => {
         return res.status(400).json({ success: false, message: 'Can only edit Draft or Submitted expenses' });
     }
     const before = expense.toObject();
-    const allowed = ['occurredAtUtc', 'vendorId', 'vendorName', 'categoryId', 'description', 'notes', 'amountNet', 'vatAmount', 'amountGross', 'vatRate', 'paymentMethod', 'paymentReference', 'branchId', 'warehouseId', 'linkedEntityType', 'linkedEntityId', 'attachments'];
+    const allowed = ['occurredAtUtc', 'vendorId', 'vendorName', 'categoryId', 'description', 'notes', 'amountNet', 'vatAmount', 'amountGross', 'vatRate', 'paymentMethod', 'paymentReference', 'locationId', 'branchId', 'warehouseId', 'linkedEntityType', 'linkedEntityId', 'attachments'];
     for (const key of allowed) {
         if (req.body[key] !== undefined) expense[key] = req.body[key];
     }

@@ -31,6 +31,7 @@
     "db:backfill-repair-datekeys": "node src/scripts/backfill-repair-londonDateKey.js",
     "db:ensure-indexes": "node src/scripts/ensure-indexes.js",
     "db:verify-ledger": "node src/scripts/verify-ledger-balance.js",
+    "db:rebuild-daily-metrics": "node src/scripts/rebuild-daily-metrics.js",
     "test": "jest"
   },
   "keywords": [

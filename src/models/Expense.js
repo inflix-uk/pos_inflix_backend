@@ -25,6 +25,8 @@ const expenseSchema = new mongoose.Schema({
     vatRate: { type: Number, default: 0, min: 0, max: 100 },
     paymentMethod: { type: String, enum: PAYMENT_METHODS, required: true },
     paymentReference: { type: String, trim: true, default: '' },
+    /** Shop this expense belongs to. null = company-wide overhead, reported under "All locations". */
+    locationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Location', default: null },
     branchId: { type: mongoose.Schema.Types.ObjectId, default: null },
     warehouseId: { type: mongoose.Schema.Types.ObjectId, default: null },
     linkedEntityType: { type: String, enum: LINKED_ENTITY_TYPES, default: null },
@@ -50,6 +52,8 @@ expenseSchema.index({ approvedByUserId: 1 });
 expenseSchema.index({ paymentMethod: 1 });
 // Compound: covers takingsDashboard expense aggregation { tenantId, status:'approved', occurredAtUtc range }
 expenseSchema.index({ tenantId: 1, status: 1, occurredAtUtc: -1 });
+// Same aggregation narrowed to one shop (Takings / P&L with a location selected).
+expenseSchema.index({ tenantId: 1, locationId: 1, status: 1, occurredAtUtc: -1 });
 
 expenseSchema.pre('save', function (next) {
     if (this.isModified('amountNet') || this.isModified('vatAmount')) {

@@ -796,6 +796,11 @@ exports.getProfitAndLoss = asyncHandler(async (req, res) => {
         status: { $in: ['Approved', 'Paid'] },
         occurredAtUtc: { $gte: fromUtc, $lte: toUtc },
     };
+    // Same rule as sales/returns above: one shop shows only that shop's expenses. Expenses with no
+    // location are company-wide overhead and stay on the "All locations" view.
+    if (locationIdParam !== 'all' && locationIdParam) {
+        expenseDateMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
+    }
 
     const [
         revenueResult,

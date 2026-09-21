@@ -9,8 +9,6 @@ const { getLondonDateKey } = require('../utils/dateKey');
 const { canViewHistoricalSales, getTodayLondonBounds, getLondonDateUtcBounds } = require('../utils/salesDateAccess');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
-const LocationDailyMetric = require('../models/LocationDailyMetric');
-const TenantDailyMetric = require('../models/TenantDailyMetric');
 const Location = require('../models/Location');
 const Sale = require('../models/Sale');
 const SalesReturn = require('../models/SalesReturn');
@@ -46,10 +44,6 @@ function mergeLedgerRowsToBuckets(rows) {
     b[key].out += Number(r.out) || 0;
   }
   return b;
-}
-
-function sumBucketIn(b) {
-  return (b.cash?.in || 0) + (b.card?.in || 0) + (b.bank?.in || 0) + (b.credit?.in || 0);
 }
 
 function sumBucketOut(b) {
@@ -256,6 +250,22 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     ? { $gte: rangeFromUtc, $lte: rangeToUtc }
     : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') };
 
+  // Expenses follow the same location rule as sales: one shop shows only that shop's expenses,
+  // while expenses with no location are company-wide overhead and surface under "All locations".
+  const expenseMatch = {
+    tenantId: tid,
+    status: { $in: ['Approved', 'Paid'] },
+    occurredAtUtc: expenseUtcRange,
+  };
+  if (locationIdParam !== 'all' && locationIdParam) {
+    expenseMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
+  } else if (userScope && userScope.length > 0) {
+    expenseMatch.$or = [
+      { locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } },
+      { locationId: null },
+    ];
+  }
+
   const salePaymentPipeline = (fastTimeMatch
     ? [{ $match: saleMatch }]
     : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
@@ -266,38 +276,59 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
         payCash: { $ifNull: ['$payments.cash', 0] },
         payCard: { $ifNull: ['$payments.card', 0] },
         payBank: { $ifNull: ['$payments.bank', 0] },
-        payCredit: { $ifNull: ['$payments.credit', 0] },
         total: '$total',
+        // A wholesale invoice is only worth total - discount. Cash/card/bank on the sale record
+        // what was handed over at checkout, which may also clear the customer's previous balance
+        // (computeWholesaleTotalOwing = previousBalance + net), so it can exceed the invoice.
+        netDue: {
+          $max: [0, { $subtract: [{ $ifNull: ['$total', 0] }, { $ifNull: ['$discount', 0] }] }],
+        },
         pm: { $ifNull: ['$paymentMethod', 'cash'] },
       },
+    },
+    {
+      $addFields: { paidNow: { $add: ['$payCash', '$payCard', '$payBank'] } },
+    },
+    {
+      $addFields: {
+        // Money taken at checkout that belongs to this invoice; the rest settles an older balance.
+        applied: { $min: ['$paidNow', '$netDue'] },
+        // Never divide by zero — paidNow of 0 gives applied 0, so the factor is 0 either way.
+        safePaid: { $cond: [{ $gt: ['$paidNow', 0] }, '$paidNow', 1] },
+      },
+    },
+    {
+      $addFields: { paidFactor: { $divide: ['$applied', '$safePaid'] } },
     },
     {
       $project: {
         cashIn: {
           $cond: [
             '$isWholesale',
-            '$payCash',
+            { $multiply: ['$payCash', '$paidFactor'] },
             { $cond: [{ $eq: ['$pm', 'cash'] }, '$total', 0] },
           ],
         },
         cardIn: {
           $cond: [
             '$isWholesale',
-            '$payCard',
+            { $multiply: ['$payCard', '$paidFactor'] },
             { $cond: [{ $eq: ['$pm', 'card'] }, '$total', 0] },
           ],
         },
         bankIn: {
           $cond: [
             '$isWholesale',
-            '$payBank',
+            { $multiply: ['$payBank', '$paidFactor'] },
             { $cond: [{ $eq: ['$pm', 'bank'] }, '$total', 0] },
           ],
         },
+        // Whatever of this invoice is still unpaid. Taken from netDue rather than payments.credit
+        // or amountDue, both of which can carry the customer's previous balance.
         creditIn: {
           $cond: [
             '$isWholesale',
-            '$payCredit',
+            { $subtract: ['$netDue', '$applied'] },
             { $cond: [{ $eq: ['$pm', 'credit'] }, '$total', 0] },
           ],
         },
@@ -314,34 +345,12 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     },
   ]);
 
-  const metricsPromise = (() => {
-    if (useUtcRange) return Promise.resolve([]);
-    if (locationIdParam === 'all' || !locationIdParam) {
-      if (userScope && userScope.length > 0) {
-        return agg([
-          { $match: { tenantId: tid, locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) }, dateKey: { $gte: from, $lte: to } } },
-          { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-        ], LocationDailyMetric);
-      }
-      return agg([
-        { $match: { tenantId: tid, dateKey: { $gte: from, $lte: to } } },
-        { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-      ], TenantDailyMetric);
-    }
-    return agg([
-      { $match: { tenantId: tid, locationId: new mongoose.Types.ObjectId(locationIdParam), dateKey: { $gte: from, $lte: to } } },
-      { $group: { _id: null, salesRevenueGross: { $sum: '$salesRevenueGross' }, salesCount: { $sum: '$salesCount' }, returnsGross: { $sum: '$returnsGross' }, returnsCount: { $sum: '$returnsCount' } } }
-    ], LocationDailyMetric);
-  })();
-
   const [
-    metricsRow,
     ledgerPaymentByMethod,
     ledgerAccountByAccount,
     voidsAgg,
     salePaymentInFromSales,
   ] = await Promise.all([
-    metricsPromise,
     agg(
       fastTimeMatch
         ? [{ $match: ledgerDateMatch }, {
@@ -399,9 +408,6 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     agg(salePaymentPipeline, Sale),
   ]);
 
-  const hasDailyMetrics = !!(metricsRow && metricsRow[0]);
-  const skipRevenueAggs = !useUtcRange && hasDailyMetrics;
-
   const [
     revenueAgg,
     cogsAgg,
@@ -410,9 +416,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     expenseTotalAgg,
     expenseByCatAgg,
   ] = await Promise.all([
-    skipRevenueAggs
-      ? Promise.resolve([])
-      : agg(
+    agg(
       fastTimeMatch
         ? [{ $match: saleMatch }, { $group: { _id: null, total: { $sum: '$total' }, count: { $sum: 1 } } }]
         : [
@@ -431,9 +435,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
       { $unwind: '$items' },
       { $group: { _id: null, cogs: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.unit_cost_at_sale', 0] }] } } } },
     ], Sale),
-    skipRevenueAggs
-      ? Promise.resolve([])
-      : agg(
+    agg(
       fastTimeMatch
         ? [{ $match: returnMatch }, { $group: { _id: null, total: { $sum: '$grandTotal' }, count: { $sum: 1 } } }]
         : [
@@ -455,21 +457,13 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     lite
       ? Promise.resolve([])
       : agg([
-      { $match: {
-        tenantId: tid,
-        status: { $in: ['Approved', 'Paid'] },
-        occurredAtUtc: expenseUtcRange,
-      } },
+      { $match: expenseMatch },
       { $group: { _id: null, total: { $sum: '$amountGross' } } }
     ], Expense),
     lite
       ? Promise.resolve([])
       : agg([
-      { $match: {
-        tenantId: tid,
-        status: { $in: ['Approved', 'Paid'] },
-        occurredAtUtc: expenseUtcRange,
-      } },
+      { $match: expenseMatch },
       { $group: { _id: '$categoryId', totalGross: { $sum: '$amountGross' }, count: { $sum: 1 } } },
       { $lookup: { from: 'expense_categories', localField: '_id', foreignField: '_id', as: 'cat' } },
       { $unwind: { path: '$cat', preserveNullAndEmptyArrays: true } },
@@ -478,28 +472,19 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     ], Expense),
   ]);
 
-  // Daily metrics rollup: when the aggregate returns no row (e.g. not backfilled), we must use
-  // Sale/SalesReturn aggregates. Using `0 ?? saleTotal` is wrong because 0 is not nullish.
-  const m = hasDailyMetrics ? metricsRow[0] : null;
-  const grossSales = round2(
-    hasDailyMetrics ? Number(m.salesRevenueGross) || 0 : Number(revenueAgg[0]?.total) || 0
-  );
-  const salesCount = hasDailyMetrics
-    ? Number(m.salesCount) || 0
-    : Number(revenueAgg[0]?.count) || 0;
-  const refundsGross = round2(
-    hasDailyMetrics ? Number(m.returnsGross) || 0 : Number(returnRevAgg[0]?.total) || 0
-  );
-  const refundsCount = hasDailyMetrics
-    ? Number(m.returnsCount) || 0
-    : Number(returnRevAgg[0]?.count) || 0;
+  // Always read Sale/SalesReturn directly. The LocationDailyMetric/TenantDailyMetric rollups are
+  // maintained by fire-and-forget $inc calls, so a dropped increment silently under-reports takings
+  // while the payment breakdown and COGS (both live) stay complete — the report then contradicts
+  // itself (e.g. gross profit turning negative). Takings is a financial report: source of truth only.
+  const grossSales = round2(Number(revenueAgg[0]?.total) || 0);
+  const salesCount = Number(revenueAgg[0]?.count) || 0;
+  const refundsGross = round2(Number(returnRevAgg[0]?.total) || 0);
+  const refundsCount = Number(returnRevAgg[0]?.count) || 0;
   const voidsRow = voidsAgg[0];
   const voidsCount = voidsRow?.count ?? 0;
   const netRevenue = round2(grossSales - refundsGross);
 
   const ledgerBuckets = mergeLedgerRowsToBuckets(ledgerPaymentByMethod);
-  const totalLedgerIn = sumBucketIn(ledgerBuckets);
-  const totalLedgerOut = sumBucketOut(ledgerBuckets);
 
   const saleInRow = salePaymentInFromSales && salePaymentInFromSales[0] ? salePaymentInFromSales[0] : {};
   const saleIn = {
@@ -508,31 +493,18 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     bank: round2(Number(saleInRow.bankIn) || 0),
     credit: round2(Number(saleInRow.creditIn) || 0),
   };
-  const totalSaleIn = saleIn.cash + saleIn.card + saleIn.bank + saleIn.credit;
 
+  // IN is always derived from the sales in the period, never from the ledger's period activity.
+  // Ledger IN also carries older-invoice settlements and money transfers, so it would not
+  // reconcile against gross sales — and which source won used to depend on whether the tenant
+  // happened to have payment accounts seeded, making two tenants report differently.
+  // OUT stays on the ledger, which records the method actually refunded.
   const paymentBuckets = {
-    cash: { in: 0, out: 0 },
-    card: { in: 0, out: 0 },
-    bank: { in: 0, out: 0 },
-    credit: { in: 0, out: 0 },
+    cash: { in: saleIn.cash, out: ledgerBuckets.cash.out },
+    card: { in: saleIn.card, out: ledgerBuckets.card.out },
+    bank: { in: saleIn.bank, out: ledgerBuckets.bank.out },
+    credit: { in: saleIn.credit, out: ledgerBuckets.credit.out },
   };
-
-  const useSaleInFallback = totalLedgerIn < 0.01 && totalSaleIn > 0.01;
-  if (useSaleInFallback) {
-    paymentBuckets.cash.in = saleIn.cash;
-    paymentBuckets.card.in = saleIn.card;
-    paymentBuckets.bank.in = saleIn.bank;
-    paymentBuckets.credit.in = saleIn.credit;
-    paymentBuckets.cash.out = ledgerBuckets.cash.out;
-    paymentBuckets.card.out = ledgerBuckets.card.out;
-    paymentBuckets.bank.out = ledgerBuckets.bank.out;
-    paymentBuckets.credit.out = ledgerBuckets.credit.out;
-  } else {
-    paymentBuckets.cash = { ...ledgerBuckets.cash };
-    paymentBuckets.card = { ...ledgerBuckets.card };
-    paymentBuckets.bank = { ...ledgerBuckets.bank };
-    paymentBuckets.credit = { ...ledgerBuckets.credit };
-  }
 
   if (refundsGross > 0.01 && sumBucketOut(paymentBuckets) < 0.01) {
     applyProportionalRefundOut(paymentBuckets, refundsGross);
@@ -570,9 +542,7 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     net: round2(Number(r.net) ?? 0)
   }));
 
-  const salesRevenue = round2(revenueAgg[0]?.total ?? grossSales);
-  const returnRevenue = round2(returnRevAgg[0]?.total ?? refundsGross);
-  const revenue = round2(salesRevenue - returnRevenue);
+  const revenue = round2(grossSales - refundsGross);
   const cogsSales = round2(cogsAgg[0]?.cogs ?? 0);
   const cogsReturnReversal = round2(returnCogsAgg[0]?.cogs ?? 0);
   const cogs = round2(cogsSales - cogsReturnReversal);
