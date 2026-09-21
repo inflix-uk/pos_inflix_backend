@@ -482,7 +482,9 @@ function buildReceiptEscpos(sale, settings, variantAttributeSlugsOrderBySku = {}
                     const desc = receiptItemDescriptionLine(item, slugOrder, categoryName);
                     parts.push(line(desc.slice(0, cols)));
                     if (o.showItemSerials !== false && item.serialNumbers && item.serialNumbers.length > 0) {
-                        parts.push(line(`IMEI: ${item.serialNumbers.join(', ').slice(0, cols - 6)}`));
+                        for (const ln of wrapTextLine(`IMEI: ${item.serialNumbers.join(', ')}`, cols)) {
+                            parts.push(line(ln));
+                        }
                     }
                     const qty = item.quantity || 1;
                     const price = item.price != null ? Number(item.price) : 0;

@@ -2145,7 +2145,7 @@ exports.updatePurchaseDetails = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, data: normalizePurchasesForResponse(updated) });
 });
 
-// @desc    Update a single purchase item (quantity for non-serial; salePrice for any item)
+// @desc    Update a single purchase item (quantity and name for non-serial; salePrice for any item)
 // @route   PATCH /api/purchases/:purchaseId/items/:itemId
 // @access  Private (admin, manager)
 // Retries on VersionError when multiple PATCHes hit the same purchase (e.g. rate list bulk price update).
@@ -2155,11 +2155,18 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     const quantity = req.body.quantity != null ? Number(req.body.quantity) : null;
     const salePrice = req.body.salePrice != null ? Number(req.body.salePrice) : null;
     const purchasePrice = req.body.purchasePrice != null ? Number(req.body.purchasePrice) : null;
+    const name = req.body.name != null ? formatProductName(String(req.body.name).trim()) : null;
 
-    if (quantity === null && salePrice === null && purchasePrice === null) {
+    if (quantity === null && salePrice === null && purchasePrice === null && name === null) {
         return res.status(400).json({
             success: false,
-            message: 'At least one of quantity, salePrice or purchasePrice is required'
+            message: 'At least one of quantity, salePrice, purchasePrice or name is required'
+        });
+    }
+    if (name !== null && !name) {
+        return res.status(400).json({
+            success: false,
+            message: 'Name cannot be empty'
         });
     }
     if (quantity !== null && !Number.isInteger(quantity)) {
@@ -2210,6 +2217,15 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
                 });
             }
             item.quantity = quantity;
+        }
+        if (name !== null) {
+            if (!item.isOtherItem) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Only non-serial (other) items can be renamed'
+                });
+            }
+            item.name = name;
         }
         if (salePrice !== null) {
             item.salePrice = salePrice;
