@@ -194,8 +194,8 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
 
   const scopeKey = (userScope && userScope.length) ? userScope.sort().join(',') : 'all';
   const cacheKeySuffix = useUtcRange
-    ? `takingsdash:shift:v1:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`
-    : `takingsdash:v4:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`;
+    ? `takingsdash:shift:v2:${tid}:${fromUtc.toISOString()}:${toUtc.toISOString()}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`
+    : `takingsdash:v5:${tid}:${from}:${to}:${locationIdParam}:${scopeKey}${lite ? ':lite' : ''}`;
   if (!useUtcRange) {
     const cached = await redis.getDashboardCache(cacheKeySuffix);
     if (cached) {
@@ -250,40 +250,50 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     ? { $gte: rangeFromUtc, $lte: rangeToUtc }
     : { $gte: new Date(from + 'T00:00:00.000Z'), $lte: new Date(to + 'T23:59:59.999Z') };
 
-  // Expenses follow the same location rule as sales: one shop shows only that shop's expenses,
-  // while expenses with no location are company-wide overhead and surface under "All locations".
-  const expenseMatch = {
-    tenantId: tid,
-    status: { $in: ['Approved', 'Paid'] },
-    occurredAtUtc: expenseUtcRange,
-  };
-  if (locationIdParam !== 'all' && locationIdParam) {
-    expenseMatch.locationId = new mongoose.Types.ObjectId(locationIdParam);
-  } else if (userScope && userScope.length > 0) {
-    expenseMatch.$or = [
-      { locationId: { $in: userScope.map((id) => new mongoose.Types.ObjectId(id)) } },
-      { locationId: null },
-    ];
-  }
-
+  // Payment IN from sales created in the selected period only.
+  // Cap attributed tender to Sale.total so previousBalance settled at checkout is excluded.
+  // Never use PaymentLedgerEntry dates for IN (those include older-balance collections).
   const salePaymentPipeline = (fastTimeMatch
     ? [{ $match: saleMatch }]
     : [{ $addFields: { londonDateKey: saleLondonDateKey } }, { $match: saleMatch }]
   ).concat([
     {
       $project: {
-        isWholesale: { $eq: ['$type', 'wholesale'] },
         payCash: { $ifNull: ['$payments.cash', 0] },
         payCard: { $ifNull: ['$payments.card', 0] },
         payBank: { $ifNull: ['$payments.bank', 0] },
-        total: '$total',
-        // A wholesale invoice is only worth total - discount. Cash/card/bank on the sale record
-        // what was handed over at checkout, which may also clear the customer's previous balance
-        // (computeWholesaleTotalOwing = previousBalance + net), so it can exceed the invoice.
-        netDue: {
-          $max: [0, { $subtract: [{ $ifNull: ['$total', 0] }, { $ifNull: ['$discount', 0] }] }],
+        payCredit: { $ifNull: ['$payments.credit', 0] },
+        total: { $ifNull: ['$total', 0] },
+        pm: {
+          $toLower: {
+            $ifNull: ['$paymentMethod', 'cash'],
+          },
         },
-        pm: { $ifNull: ['$paymentMethod', 'cash'] },
+      },
+    },
+    {
+      $addFields: {
+        invoiceNet: { $max: [0, '$total'] },
+        tendered: {
+          $add: ['$payCash', '$payCard', '$payBank'],
+        },
+      },
+    },
+    {
+      $addFields: {
+        hasTender: { $gt: ['$tendered', 0.000001] },
+        scale: {
+          $cond: [
+            { $lte: ['$tendered', 0.000001] },
+            0,
+            {
+              $divide: [
+                { $min: ['$tendered', '$invoiceNet'] },
+                '$tendered',
+              ],
+            },
+          ],
+        },
       },
     },
     {
@@ -304,32 +314,80 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
       $project: {
         cashIn: {
           $cond: [
-            '$isWholesale',
-            { $multiply: ['$payCash', '$paidFactor'] },
-            { $cond: [{ $eq: ['$pm', 'cash'] }, '$total', 0] },
+            '$hasTender',
+            { $multiply: ['$payCash', '$scale'] },
+            {
+              $cond: [
+                { $eq: ['$pm', 'cash'] },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         cardIn: {
           $cond: [
-            '$isWholesale',
-            { $multiply: ['$payCard', '$paidFactor'] },
-            { $cond: [{ $eq: ['$pm', 'card'] }, '$total', 0] },
+            '$hasTender',
+            { $multiply: ['$payCard', '$scale'] },
+            {
+              $cond: [
+                { $eq: ['$pm', 'card'] },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         bankIn: {
           $cond: [
-            '$isWholesale',
-            { $multiply: ['$payBank', '$paidFactor'] },
-            { $cond: [{ $eq: ['$pm', 'bank'] }, '$total', 0] },
+            '$hasTender',
+            { $multiply: ['$payBank', '$scale'] },
+            {
+              $cond: [
+                {
+                  $or: [{ $eq: ['$pm', 'bank'] }, { $eq: ['$pm', 'transfer'] }],
+                },
+                '$invoiceNet',
+                0,
+              ],
+            },
           ],
         },
         // Whatever of this invoice is still unpaid. Taken from netDue rather than payments.credit
         // or amountDue, both of which can carry the customer's previous balance.
         creditIn: {
           $cond: [
-            '$isWholesale',
-            { $subtract: ['$netDue', '$applied'] },
-            { $cond: [{ $eq: ['$pm', 'credit'] }, '$total', 0] },
+            '$hasTender',
+            {
+              $max: [
+                0,
+                {
+                  $subtract: [
+                    '$invoiceNet',
+                    {
+                      $add: [
+                        { $multiply: ['$payCash', '$scale'] },
+                        { $multiply: ['$payCard', '$scale'] },
+                        { $multiply: ['$payBank', '$scale'] },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              $cond: [
+                { $eq: ['$pm', 'credit'] },
+                '$invoiceNet',
+                {
+                  $cond: [
+                    { $gt: ['$payCredit', 0] },
+                    '$invoiceNet',
+                    0,
+                  ],
+                },
+              ],
+            },
           ],
         },
       },
@@ -505,6 +563,17 @@ exports.getTakingsDashboard = asyncHandler(async (req, res) => {
     bank: { in: saleIn.bank, out: ledgerBuckets.bank.out },
     credit: { in: saleIn.credit, out: ledgerBuckets.credit.out },
   };
+
+  // Payment IN: only from sales created in the selected range (never ledger-by-date).
+  paymentBuckets.cash.in = saleIn.cash;
+  paymentBuckets.card.in = saleIn.card;
+  paymentBuckets.bank.in = saleIn.bank;
+  paymentBuckets.credit.in = saleIn.credit;
+  // Payment OUT: ledger refunds/voids in the same date range (plus proportional fallback below).
+  paymentBuckets.cash.out = ledgerBuckets.cash.out;
+  paymentBuckets.card.out = ledgerBuckets.card.out;
+  paymentBuckets.bank.out = ledgerBuckets.bank.out;
+  paymentBuckets.credit.out = ledgerBuckets.credit.out;
 
   if (refundsGross > 0.01 && sumBucketOut(paymentBuckets) < 0.01) {
     applyProportionalRefundOut(paymentBuckets, refundsGross);
