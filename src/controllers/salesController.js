@@ -17,6 +17,7 @@ const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
 const metricsService = require('../services/metricsService');
 const paymentAccountService = require('../services/paymentAccountService');
+const invoiceDelivery = require('../utils/invoiceDelivery');
 const {
     legacyFindInStockSerials,
     invalidateStockPurchasesCache,
@@ -1808,6 +1809,42 @@ exports.getFindBySerial = asyncHandler(async (req, res) => {
             serial,
         },
     });
+});
+
+/** Load a sale for delivery, honouring tenant and the user's location scope. */
+async function findSaleForDelivery(req) {
+    const tenantId = getTenantIdFromReq(req);
+    const sale = await Sale.findOne({ _id: req.params.id, tenantId })
+        .select('_id reference customerName total locationId')
+        .lean();
+    if (!sale) return null;
+    const userScope = getUserLocationScope(req.user);
+    if (userScope && userScope.length > 0 && sale.locationId) {
+        if (!userScope.includes(String(sale.locationId))) return null;
+    }
+    return sale;
+}
+
+// @desc    Email this invoice's PDF to the customer (PDF rendered by the client).
+// @route   POST /api/sales/:id/send-email
+// @access  Private (sale.view)
+exports.sendSaleByEmail = asyncHandler(async (req, res) => {
+    const sale = await findSaleForDelivery(req);
+    if (!sale) {
+        return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+    return invoiceDelivery.sendPdfByEmail(req, res, sale);
+});
+
+// @desc    Queue this invoice's PDF for the customer on the connected WhatsApp.
+// @route   POST /api/sales/:id/send-whatsapp
+// @access  Private (sale.view)
+exports.sendSaleByWhatsapp = asyncHandler(async (req, res) => {
+    const sale = await findSaleForDelivery(req);
+    if (!sale) {
+        return res.status(404).json({ success: false, message: 'Sale not found' });
+    }
+    return invoiceDelivery.queuePdfForWhatsapp(req, res, sale);
 });
 
 // @desc    Take a follow-up partial payment against an existing sale.

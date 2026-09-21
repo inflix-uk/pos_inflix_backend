@@ -31,3 +31,6 @@ coverage/
 # Uploads
 uploads/
 .vercel
+
+# Migration backups (contain live tenant data)
+scripts/backups/

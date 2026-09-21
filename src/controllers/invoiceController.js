@@ -21,8 +21,7 @@ const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries
 const { invalidateInventoryListCaches } = require('./purchaseController');
 const serialIndexService = require('../services/serialIndexService');
 const stockItemService = require('../services/stockItemService');
-const EmailSettings = require('../models/EmailSettings');
-const emailService = require('../lib/emailService');
+const invoiceDelivery = require('../utils/invoiceDelivery');
 const { getLondonDateUtcBounds, applySalesDateRestriction } = require('../utils/salesDateAccess');
 
 function escapeRegex(str) {
@@ -474,64 +473,7 @@ const sendInvoiceByEmail = asyncHandler(async (req, res) => {
     if (!invoice) {
         return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-
-    const { to, pdfBase64, filename } = req.body || {};
-    const toTrim = String(to || '').trim();
-    if (!toTrim) {
-        return res.status(400).json({ success: false, message: 'Recipient email is required' });
-    }
-    if (!/^\S+@\S+\.\S+$/.test(toTrim)) {
-        return res.status(400).json({ success: false, message: 'Invalid email address' });
-    }
-    if (!pdfBase64) {
-        return res.status(400).json({ success: false, message: 'PDF attachment is required' });
-    }
-
-    const settings = await EmailSettings.getSettings();
-    if (!settings || !settings.smtpHost) {
-        return res.status(503).json({
-            success: false,
-            message: 'Email is not configured. Go to Settings → Email and save your SMTP settings.',
-        });
-    }
-
-    let pdfBuffer;
-    try {
-        pdfBuffer = Buffer.from(String(pdfBase64), 'base64');
-    } catch {
-        return res.status(400).json({ success: false, message: 'Invalid PDF data' });
-    }
-    if (!pdfBuffer.length || pdfBuffer.length < 100) {
-        return res.status(400).json({ success: false, message: 'PDF attachment is empty or invalid' });
-    }
-
-    const ref = invoice.reference || 'invoice';
-    const customer = invoice.customerName || 'Customer';
-    const safeFilename = String(filename || `invoice-${ref}.pdf`).replace(/[/\\]/g, '_');
-    const subject = `Invoice ${ref} — ${customer}`;
-    const text = `Please find attached invoice ${ref} for ${customer}.`;
-    const html = `<p>Please find attached invoice <strong>${ref}</strong> for <strong>${customer}</strong>.</p>`;
-
-    try {
-        await emailService.sendWithPdfAttachment(settings, {
-            to: toTrim,
-            subject,
-            text,
-            html,
-            pdfBuffer,
-            filename: safeFilename,
-        });
-    } catch (err) {
-        return res.status(502).json({
-            success: false,
-            message: err.message || 'Failed to send email',
-        });
-    }
-
-    res.status(200).json({
-        success: true,
-        message: `Invoice emailed to ${toTrim}`,
-    });
+    return invoiceDelivery.sendPdfByEmail(req, res, invoice);
 });
 
 /**
@@ -544,54 +486,7 @@ const sendInvoiceByWhatsapp = asyncHandler(async (req, res) => {
     if (!invoice) {
         return res.status(404).json({ success: false, message: 'Invoice not found' });
     }
-
-    const tenantId = getTenantIdFromReq(req);
-    if (!whatsappSession.isConnected(tenantId)) {
-        return res.status(409).json({
-            success: false,
-            code: 'WA_NOT_CONNECTED',
-            message: 'WhatsApp is not connected. Go to Settings → WhatsApp and scan the QR code.',
-        });
-    }
-
-    const { phone, pdfBase64, filename, message } = req.body || {};
-    if (!pdfBase64) {
-        return res.status(400).json({ success: false, message: 'PDF attachment is required' });
-    }
-    const pdfBuffer = Buffer.from(String(pdfBase64), 'base64');
-    if (pdfBuffer.length < 100 || pdfBuffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
-        return res.status(400).json({ success: false, message: 'PDF attachment is empty or invalid' });
-    }
-
-    const ref = invoice.reference || 'invoice';
-    const customer = invoice.customerName || 'Customer';
-    const safeFilename = String(filename || `invoice-${ref}.pdf`).replace(/[/\\]/g, '_').slice(0, 255);
-    const total = new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(invoice.total) || 0);
-    const caption = String(message || '').trim() || `Invoice ${ref} for ${customer}. Total: ${total}.`;
-
-    try {
-        const out = await whatsappQueue.enqueueMessage({
-            phone,
-            recipientName: customer,
-            text: caption,
-            attachment: { filename: safeFilename, mimetype: 'application/pdf', data: pdfBuffer },
-            source: 'invoice',
-            sourceRef: { invoiceId: invoice._id, reference: invoice.reference },
-            dedupeKey: whatsappQueue.invoiceDedupeKey(invoice._id),
-            createdByUserId: req.user && req.user._id,
-        });
-        whatsappWorker.kick(tenantId);
-        return res.status(202).json({
-            success: true,
-            message: `Invoice ${ref} queued for WhatsApp to +${out.message.recipientPhone}`,
-            data: out,
-        });
-    } catch (e) {
-        if (e instanceof whatsappQueue.WhatsappQueueError) {
-            return res.status(e.status).json({ success: false, code: e.code, message: e.message });
-        }
-        throw e;
-    }
+    return invoiceDelivery.queuePdfForWhatsapp(req, res, invoice);
 });
 
 module.exports = {
