@@ -39,6 +39,7 @@ exports.getGeneralSettings = asyncHandler(async (req, res) => {
                 defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
                 retailModeEnabled: !!settings.retailModeEnabled,
                 allowNegativeStock: !!settings.allowNegativeStock,
+                accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false,
                 updatedAtUtc: settings.updatedAt
             };
             if (settings.defaultSalesAccountId) {
@@ -157,6 +158,7 @@ exports.updateSalesMode = asyncHandler(async (req, res) => {
         defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
         retailModeEnabled: !!settings.retailModeEnabled,
         allowNegativeStock: !!settings.allowNegativeStock,
+        accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false,
         updatedAtUtc: settings.updatedAt
     };
     if (settings.defaultSalesAccountId) {
@@ -203,6 +205,54 @@ exports.updateNegativeStock = asyncHandler(async (req, res) => {
         defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
         retailModeEnabled: !!settings.retailModeEnabled,
         allowNegativeStock: !!settings.allowNegativeStock,
+        accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false,
+        updatedAtUtc: settings.updatedAt
+    };
+    if (settings.defaultSalesAccountId) {
+        const account = await findActiveAccountById(settings.defaultSalesAccountId);
+        if (account) {
+            data.defaultAccount = { _id: account.doc._id.toString(), name: account.doc.name };
+        }
+    }
+    res.status(200).json({
+        success: true,
+        message: 'Settings updated',
+        data
+    });
+});
+
+// @desc    Update whether a customer's balance is used at checkout
+// @route   PUT /api/settings/general/account-balance-at-checkout
+// @access  Private (settings.manage)
+exports.updateAccountBalanceAtCheckout = asyncHandler(async (req, res) => {
+    const { accountBalanceAtCheckoutEnabled } = req.body;
+    if (typeof accountBalanceAtCheckoutEnabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'accountBalanceAtCheckoutEnabled must be a boolean' });
+    }
+    let settings = await GeneralSettings.findOne();
+    if (!settings) {
+        settings = await GeneralSettings.create({});
+    }
+    const before = { accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false };
+    settings.accountBalanceAtCheckoutEnabled = accountBalanceAtCheckoutEnabled;
+    settings.updatedByUserId = req.user && req.user._id ? req.user._id : null;
+    await settings.save();
+    const after = { accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false };
+    await activityLogService.logFromReq(req, {
+        action: 'SETTINGS_UPDATED',
+        entityType: 'Settings',
+        entityId: 'general-account-balance-at-checkout',
+        success: true,
+        message: 'Customer balance at checkout updated',
+        diffJson: { before, after }
+    });
+    await invalidateGeneralSettingsCache(getTenantIdFromReq(req));
+    const data = {
+        salesAutoSelectAccountEnabled: !!settings.salesAutoSelectAccountEnabled,
+        defaultSalesAccountId: settings.defaultSalesAccountId ? settings.defaultSalesAccountId.toString() : null,
+        retailModeEnabled: !!settings.retailModeEnabled,
+        allowNegativeStock: !!settings.allowNegativeStock,
+        accountBalanceAtCheckoutEnabled: settings.accountBalanceAtCheckoutEnabled !== false,
         updatedAtUtc: settings.updatedAt
     };
     if (settings.defaultSalesAccountId) {
