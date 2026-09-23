@@ -39,6 +39,7 @@ const {
     normalizePaymentBreakdown,
     computeRemainingAmountDue,
     computeWholesaleTotalOwing,
+    resolveWholesaleCheckoutAmounts,
 } = require('../utils/wholesalePaymentAmounts');
 
 const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials', 'purchases:stock-list'];
@@ -1373,16 +1374,24 @@ exports.createSale = asyncHandler(async (req, res) => {
     if (body.type === 'retail') {
         saleData.paymentMethod = body.paymentMethod || 'cash';
     } else {
-        saleData.previousBalance = Number(body.previousBalance) || 0;
         saleData.customerId = body.customerId || null;
         saleData.customerName = body.customerName || null;
-        saleData.payments = normalizePaymentBreakdown(body.payments);
-        saleData.amountDue = computeRemainingAmountDue({
+        // Only the shared Walk-in account needs checking, and only when a balance was sent.
+        let isWalkInAccount = false;
+        if (saleData.customerId && (Number(body.previousBalance) || 0) !== 0) {
+            const account = await Customer.findById(saleData.customerId).select('isWalkIn').lean();
+            isWalkInAccount = !!(account && account.isWalkIn);
+        }
+        const checkout = resolveWholesaleCheckoutAmounts({
             total: saleData.total,
             discount: saleData.discount,
-            previousBalance: saleData.previousBalance,
-            payments: saleData.payments,
+            previousBalance: body.previousBalance,
+            payments: body.payments,
+            isWalkInAccount,
         });
+        saleData.previousBalance = checkout.previousBalance;
+        saleData.payments = checkout.payments;
+        saleData.amountDue = checkout.amountDue;
         saleData.bankAccount = body.bankAccount || undefined;
     }
 
