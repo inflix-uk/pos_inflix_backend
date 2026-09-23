@@ -31,6 +31,21 @@ function computeRemainingAmountDue(fields) {
     return round2(Math.max(0, totalOwing - paidNow));
 }
 
+/**
+ * Checkout amounts stored on a wholesale sale.
+ * Walk-in is one shared account for every anonymous sale, so its balance belongs to earlier
+ * walk-in customers: it is never carried into a new invoice, in either direction. Credit is the
+ * unpaid remainder, so it is re-derived once that balance is dropped (an older client sizes it
+ * against the balance it still had).
+ */
+function resolveWholesaleCheckoutAmounts({ total, discount, previousBalance, payments, isWalkInAccount }) {
+    const breakdown = normalizePaymentBreakdown(payments);
+    const prev = isWalkInAccount ? 0 : round2(Number(previousBalance) || 0);
+    const amountDue = computeRemainingAmountDue({ total, discount, previousBalance: prev, payments: breakdown });
+    if (isWalkInAccount) breakdown.credit = Math.min(breakdown.credit, amountDue);
+    return { previousBalance: prev, amountDue, payments: breakdown };
+}
+
 /** Build payments breakdown from a single method + amount (retail/repair checkout). */
 function paymentBreakdownFromMethod(method, amount) {
     const payments = { cash: 0, card: 0, credit: 0, bank: 0, split: 0 };
@@ -49,5 +64,6 @@ module.exports = {
     computeWholesaleTotalOwing,
     computeWholesalePaidNow,
     computeRemainingAmountDue,
+    resolveWholesaleCheckoutAmounts,
     paymentBreakdownFromMethod
 };
