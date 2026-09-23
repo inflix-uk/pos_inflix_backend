@@ -17,6 +17,7 @@ const PAYMENT_METHOD_TO_LEDGER = { cash: 'cash', card: 'card', bank: 'bank' };
 const Product = require('../models/Product');
 const Purchase = require('../models/Purchase');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
+const { findBlockingReturnedToSupplierAmong } = require('../utils/returnedToSupplierQueries');
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
@@ -310,21 +311,16 @@ async function createSaleInTransaction(session, saleData, options = {}) {
         )
     )];
     if (serialsToCheck.length > 0) {
-        const [alreadySold, returnedToSupplierHistory, returnedToSupplierSold] = await Promise.all([
+        const [alreadySold, blockedReturned] = await Promise.all([
             findActiveSoldSerialsAmong(serialsToCheck, session),
-            SerialHistory.find({ serialNumber: { $in: serialsToCheck }, eventType: 'returned_to_supplier' }).session(session).select('serialNumber').lean(),
-            SoldSerial.find({ serialNumber: { $in: serialsToCheck }, status: 'returned', returnDestination: 'return_to_supplier' }).session(session).select('serialNumber').lean()
+            findBlockingReturnedToSupplierAmong(serialsToCheck, saleData.tenantId || 'default', session),
         ]);
         if (alreadySold.length > 0) {
             const list = alreadySold.map((s) => s.serialNumber).join(', ');
             throw new Error(`Serial number(s) already sold: ${list}`);
         }
-        const blocked = [...new Set([
-            ...returnedToSupplierHistory.map((s) => s.serialNumber),
-            ...returnedToSupplierSold.map((s) => s.serialNumber)
-        ])];
-        if (blocked.length > 0) {
-            throw new Error(`Serial number(s) returned to supplier and not available to sell: ${blocked.join(', ')}`);
+        if (blockedReturned.length > 0) {
+            throw new Error(`Serial number(s) returned to supplier and not available to sell: ${blockedReturned.join(', ')}`);
         }
     }
     // Pre-flight non-serial stock check — must run BEFORE writing the Sale doc.

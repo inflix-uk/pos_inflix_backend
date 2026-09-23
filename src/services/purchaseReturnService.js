@@ -7,6 +7,7 @@ const PurchaseReturn = require('../models/PurchaseReturn');
 const Purchase = require('../models/Purchase');
 const SerialHistory = require('../models/SerialHistory');
 const activityLogService = require('../services/activityLogService');
+const serialIndexService = require('./serialIndexService');
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
 
 /** Format: PR-000001, PR-000002, ... (6-digit sequence). Scoped by tenantId. */
@@ -172,6 +173,24 @@ async function createPurchaseReturn(userId, payload, options = {}) {
     if (historyDocs.length > 0) {
         await SerialHistory.insertMany(historyDocs);
     }
+
+    const tid = tenantId;
+    for (const line of returnLines) {
+        for (const imei of (line.imeisReturned || [])) {
+            const serial = serialIndexService.normalizeSerial(imei);
+            if (!serial) continue;
+            serialIndexService.upsertSerialIndex(tid, {
+                serial,
+                status: 'returned_to_supplier',
+            }).catch(() => {});
+        }
+    }
+
+    try {
+        const purchaseCtrl = require('../controllers/purchaseController');
+        purchaseCtrl.invalidateStockPurchasesCache?.(tid);
+        purchaseCtrl.invalidateStockSerialSetCache?.(tid);
+    } catch (_) { /* ignore */ }
 
     if (req) {
         await activityLogService.logFromReq(req, {

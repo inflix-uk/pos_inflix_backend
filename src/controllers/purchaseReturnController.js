@@ -3,10 +3,12 @@ const Purchase = require('../models/Purchase');
 const SerialHistory = require('../models/SerialHistory');
 const asyncHandler = require('../middleware/asyncHandler');
 const purchaseReturnService = require('../services/purchaseReturnService');
+const serialIndexService = require('../services/serialIndexService');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const purchaseCtrl = require('./purchaseController');
 
 // @route   GET /api/purchase-returns
 // @access  Private (purchase.return)
@@ -225,6 +227,29 @@ exports.receiveRepair = asyncHandler(async (req, res) => {
         };
     });
     await SerialHistory.insertMany(historyDocs);
+
+    for (const imei of imeis) {
+        const serial = serialIndexService.normalizeSerial(imei);
+        if (!serial) continue;
+        const purchaseItemId = imeiToItemId[imei];
+        const item = (purchaseDoc.items || []).find((i) => String(i._id) === String(purchaseItemId));
+        serialIndexService.upsertSerialIndex(tenantId, {
+            serial,
+            status: 'in_stock',
+            purchaseId: purchaseDoc._id,
+            purchaseItemId: purchaseItemId || null,
+            unitCost: item ? Number(item.purchasePrice) || null : null,
+            salePrice: item ? Number(item.salePrice) || null : null,
+            grade: item?.grade,
+            colour: item?.colour,
+            brand: item?.brand,
+            brandModel: item?.brandModel,
+            capacity: item?.capacity,
+        }).catch(() => {});
+    }
+
+    purchaseCtrl.invalidateStockPurchasesCache?.(tenantId);
+    purchaseCtrl.invalidateStockSerialSetCache?.(tenantId);
 
     const populated = await PurchaseReturn.findById(purchaseReturn._id)
         .populate('purchase', 'purchaseNumber date status grandTotal')

@@ -21,6 +21,10 @@ const {
     distinctSerialNumbersSoldOnActiveSales,
     findActiveSoldSerialsAmong,
 } = require('../utils/activeSoldSerialQueries');
+const {
+    findBlockingReturnedToSupplierAmong,
+    distinctBlockingReturnedToSupplierSerials,
+} = require('../utils/returnedToSupplierQueries');
 const { purchasePartyLabel } = require('../utils/supplierDisplay');
 const { normalizePurchaseItems } = require('../utils/normalizePurchaseItems');
 const { formatProductName } = require('../utils/formatProductName');
@@ -318,14 +322,20 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
     if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId && !isIncompleteIndexProduct(indexOne.product)) {
         return respond(200, { success: true, data: indexOne.product });
     }
+    // Index may still say returned after a re-purchase if cache lagged; only hard-block when
+    // the serial is not currently on a live purchase.
     if (indexOne?.status === 'returned_to_supplier') {
-        return respond(404, { success: false, message: 'Serial was returned to supplier and is not available to sell' });
+        const stillBlocking = await findBlockingReturnedToSupplierAmong([normalized], tenantId);
+        if (stillBlocking.length > 0) {
+            return respond(404, { success: false, message: 'Serial was returned to supplier and is not available to sell' });
+        }
     }
 
     const needsLegacy =
         !indexOne ||
         indexOne.status === 'not_found' ||
         indexOne.status === 'already_sold' ||
+        indexOne.status === 'returned_to_supplier' ||
         (indexOne.status === 'in_stock' && (!indexOne.product || isIncompleteIndexProduct(indexOne.product) || !!pricingGroupId));
 
     let one = indexOne;
@@ -451,10 +461,10 @@ async function legacyFindInStockSerials(serials, tenantId) {
     if (!serials || serials.length === 0) return [];
     const tid = tenantId || 'default';
     const toProcess = serials.slice(0, 500);
-    const [soldDocs, returnedHistory, returnedSold] = await Promise.all([
+    const [soldDocs, blockedReturned] = await Promise.all([
         SoldSerial.find({ serialNumber: { $in: toProcess }, status: { $ne: 'returned' } }).select('serialNumber').populate('saleId', 'reference customerName status').lean(),
-        SerialHistory.find({ serialNumber: { $in: toProcess }, eventType: 'returned_to_supplier' }).select('serialNumber').lean(),
-        SoldSerial.find({ serialNumber: { $in: toProcess }, status: 'returned', returnDestination: 'return_to_supplier' }).select('serialNumber').lean(),
+        // Only block if returned AND not currently on a live purchase (allows re-purchase).
+        findBlockingReturnedToSupplierAmong(toProcess, tid),
     ]);
     const soldDocsActive = soldDocs.filter((d) => d.saleId && d.saleId.status !== 'voided');
     const soldSet = new Set(soldDocsActive.map((d) => d.serialNumber));
@@ -464,10 +474,7 @@ async function legacyFindInStockSerials(serials, tenantId) {
             soldInfoMap[d.serialNumber] = { reference: d.saleId.reference, customerName: d.saleId.customerName };
         }
     });
-    const returnedSet = new Set([
-        ...(returnedHistory || []).map((d) => d.serialNumber),
-        ...(returnedSold || []).map((d) => d.serialNumber),
-    ].filter(Boolean));
+    const returnedSet = new Set(blockedReturned || []);
     const availableSerials = toProcess.filter((s) => !soldSet.has(s) && !returnedSet.has(s));
     const results = [];
     for (const serial of toProcess) {
@@ -1094,13 +1101,17 @@ exports.invalidateStockPurchasesCache = function (tenantId) {
     cache.bumpNs('purchases:stock-list', tenantId).catch(() => {});
 };
 
-async function fetchStockSerialSets() {
-    const [a, b, c] = await Promise.all([
+async function fetchStockSerialSets(tenantId) {
+    const [a, blockingReturned] = await Promise.all([
         distinctSerialNumbersSoldOnActiveSales(),
-        SerialHistory.distinct('serialNumber', { eventType: 'returned_to_supplier' }),
-        SoldSerial.distinct('serialNumber', { status: 'returned', returnDestination: 'return_to_supplier' }),
+        // Historic returns that are NOT currently on a live purchase (re-purchased IMEIs stay sellable).
+        distinctBlockingReturnedToSupplierSerials(tenantId),
     ]);
-    return { soldSerials: a, returnedToSupplierSerials: b, soldReturnedToSupplierSerials: c };
+    return {
+        soldSerials: a,
+        returnedToSupplierSerials: blockingReturned,
+        soldReturnedToSupplierSerials: [],
+    };
 }
 
 async function fetchStockPurchasesResolved(tenantId) {
@@ -1172,9 +1183,9 @@ async function resolveStockPurchasesAndSerialSets(tenantId) {
     let setsP;
     if (cachedSets) {
         setsP = Promise.resolve(cachedSets.value);
-        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, fetchStockSerialSets);
+        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, () => fetchStockSerialSets(tenantId));
     } else {
-        setsP = _stockSerialSetCache.fetch(tenantId, fetchStockSerialSets);
+        setsP = _stockSerialSetCache.fetch(tenantId, () => fetchStockSerialSets(tenantId));
     }
 
     let purchasesP;
@@ -1454,9 +1465,9 @@ exports.getStockViewRows = asyncHandler(async (req, res) => {
     let setsP, purchasesP;
     if (cachedSets) {
         setsP = Promise.resolve(cachedSets.value);
-        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, fetchStockSerialSets);
+        if (cachedSets.isStale) _stockSerialSetCache.revalidate(tenantId, () => fetchStockSerialSets(tenantId));
     } else if (needsSerialQueries) {
-        setsP = _stockSerialSetCache.fetch(tenantId, fetchStockSerialSets);
+        setsP = _stockSerialSetCache.fetch(tenantId, () => fetchStockSerialSets(tenantId));
     } else {
         setsP = Promise.resolve({ soldSerials: [], returnedToSupplierSerials: [], soldReturnedToSupplierSerials: [] });
     }
@@ -1962,6 +1973,7 @@ exports.createPurchase = asyncHandler(async (req, res) => {
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
     exports.invalidateStockPurchasesCache(tenantId);
+    exports.invalidateStockSerialSetCache(tenantId);
     await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     // Populate the StockItem index for the new purchase (denormalized read model).
     stockItemService.rebuildForPurchase(populated).catch(() => {});

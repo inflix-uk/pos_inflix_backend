@@ -231,9 +231,9 @@ exports.getSerialHistory = asyncHandler(async (req, res) => {
                 .select('status')
                 .lean();
 
+            // Presence on a live purchase wins over historic returned_to_supplier
+            // (serial may have been returned then re-purchased / received again).
             if (!purchase || !purchase.status || purchase.status === 'cancelled') {
-                status = 'not_in_stock';
-            } else if ((historyEvents || []).some((e) => e.eventType === 'returned_to_supplier')) {
                 status = 'not_in_stock';
             } else {
                 status = 'in_stock';

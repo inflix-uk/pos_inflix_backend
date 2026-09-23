@@ -26,6 +26,7 @@ const {
 } = require('./purchaseController');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const { findActiveSoldSerialsAmong } = require('../utils/activeSoldSerialQueries');
+const { findBlockingReturnedToSupplierAmong } = require('../utils/returnedToSupplierQueries');
 const { enrichSaleItemsFromPurchase } = require('../utils/enrichSaleItemsFromPurchase');
 const { getUserLocationScope } = require('../utils/dashboardHelpers');
 const {
@@ -829,14 +830,16 @@ exports.updateSale = asyncHandler(async (req, res) => {
             if (other) {
                 return res.status(400).json({ success: false, message: `Serial ${serial} is already sold on another invoice` });
             }
-            const returnedToSupplierHistory = await SerialHistory.findOne({ serialNumber: serial, eventType: 'returned_to_supplier' }).select('_id').lean();
-            if (returnedToSupplierHistory) {
-                return res.status(400).json({ success: false, message: `Serial ${serial} was returned to supplier and is not available to sell` });
-            }
-            const soldReturnedToSupplier = await SoldSerial.findOne({ serialNumber: serial, status: 'returned', returnDestination: 'return_to_supplier' }).select('_id').lean();
-            if (soldReturnedToSupplier) {
-                return res.status(400).json({ success: false, message: `Serial ${serial} was returned to supplier and is not available to sell` });
-            }
+        }
+        const blockedReturned = await findBlockingReturnedToSupplierAmong(
+            addedSerialsCheck,
+            getTenantIdFromReq(req)
+        );
+        if (blockedReturned.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Serial ${blockedReturned[0]} was returned to supplier and is not available to sell`,
+            });
         }
     }
 
