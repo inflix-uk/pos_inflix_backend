@@ -1371,23 +1371,26 @@ exports.createSale = asyncHandler(async (req, res) => {
     // (cart may still hold stale SerialIndex names after purchase model restore).
     saleData.items = await enrichSaleItemsFromPurchase(saleData.items, tenantId);
 
+    const generalSettings = await GeneralSettings.getSettings();
+
     if (body.type === 'retail') {
         saleData.paymentMethod = body.paymentMethod || 'cash';
     } else {
         saleData.customerId = body.customerId || null;
         saleData.customerName = body.customerName || null;
-        // Only the shared Walk-in account needs checking, and only when a balance was sent.
-        let isWalkInAccount = false;
-        if (saleData.customerId && (Number(body.previousBalance) || 0) !== 0) {
+        // Settled from the account statement instead when the company turned this off, and always
+        // for the shared Walk-in account. Only worth a lookup when a balance was actually sent.
+        let carryAccountBalance = generalSettings.accountBalanceAtCheckoutEnabled !== false;
+        if (carryAccountBalance && saleData.customerId && (Number(body.previousBalance) || 0) !== 0) {
             const account = await Customer.findById(saleData.customerId).select('isWalkIn').lean();
-            isWalkInAccount = !!(account && account.isWalkIn);
+            if (account && account.isWalkIn) carryAccountBalance = false;
         }
         const checkout = resolveWholesaleCheckoutAmounts({
             total: saleData.total,
             discount: saleData.discount,
             previousBalance: body.previousBalance,
             payments: body.payments,
-            isWalkInAccount,
+            carryAccountBalance,
         });
         saleData.previousBalance = checkout.previousBalance;
         saleData.payments = checkout.payments;
@@ -1396,7 +1399,6 @@ exports.createSale = asyncHandler(async (req, res) => {
     }
 
     // Retail mode (walk-in): enforce full payment, no credit, use Walk-in customer if none
-    const generalSettings = await GeneralSettings.getSettings();
     const { getEffectiveRetailModeEnabled } = require('../utils/effectiveRetailMode');
     const retailModeActive = await getEffectiveRetailModeEnabled(req.user._id);
     if (body.type === 'wholesale' && retailModeActive) {

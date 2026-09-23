@@ -33,16 +33,17 @@ function computeRemainingAmountDue(fields) {
 
 /**
  * Checkout amounts stored on a wholesale sale.
- * Walk-in is one shared account for every anonymous sale, so its balance belongs to earlier
- * walk-in customers: it is never carried into a new invoice, in either direction. Credit is the
- * unpaid remainder, so it is re-derived once that balance is dropped (an older client sizes it
- * against the balance it still had).
+ * With `carryAccountBalance` false the sale stands alone: what the account owes is not added and
+ * its store credit is not spent. That is always the case for the shared Walk-in account, whose
+ * balance belongs to earlier walk-in customers, and company-wide when the setting is off. Credit
+ * is the unpaid remainder, so it is re-derived once the balance is dropped (an older client sizes
+ * it against the balance it still had).
  */
-function resolveWholesaleCheckoutAmounts({ total, discount, previousBalance, payments, isWalkInAccount }) {
+function resolveWholesaleCheckoutAmounts({ total, discount, previousBalance, payments, carryAccountBalance = true }) {
     const breakdown = normalizePaymentBreakdown(payments);
-    const prev = isWalkInAccount ? 0 : round2(Number(previousBalance) || 0);
+    const prev = carryAccountBalance ? round2(Number(previousBalance) || 0) : 0;
     const amountDue = computeRemainingAmountDue({ total, discount, previousBalance: prev, payments: breakdown });
-    if (isWalkInAccount) breakdown.credit = Math.min(breakdown.credit, amountDue);
+    if (!carryAccountBalance) breakdown.credit = Math.min(breakdown.credit, amountDue);
     return { previousBalance: prev, amountDue, payments: breakdown };
 }
 

@@ -27,6 +27,12 @@ describe('General Settings', () => {
             expect(schema.retailModeEnabled.default).toBe(false);
         });
 
+        it('has accountBalanceAtCheckoutEnabled with default true', () => {
+            const schema = GeneralSettings.schema.obj;
+            expect(schema.accountBalanceAtCheckoutEnabled).toBeDefined();
+            expect(schema.accountBalanceAtCheckoutEnabled.default).toBe(true);
+        });
+
         it('has updatedByUserId and timestamps', () => {
             const schema = GeneralSettings.schema.obj;
             expect(schema.updatedByUserId).toBeDefined();

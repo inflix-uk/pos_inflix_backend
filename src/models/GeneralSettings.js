@@ -25,6 +25,16 @@ const generalSettingsSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
+    /**
+     * When true (default), a named account's balance is carried into checkout: what it owes is
+     * added to the amount due and its store credit pays part of the sale. When false, every sale
+     * stands alone and the balance is only settled from the account statement. The shared Walk-in
+     * account never carries a balance either way.
+     */
+    accountBalanceAtCheckoutEnabled: {
+        type: Boolean,
+        default: true
+    },
     updatedByUserId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

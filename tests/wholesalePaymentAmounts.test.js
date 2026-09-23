@@ -58,7 +58,7 @@ describe('resolveWholesaleCheckoutAmounts', () => {
                 discount: 0,
                 previousBalance: 25,
                 payments: { cash: 50 },
-                isWalkInAccount: false,
+                carryAccountBalance: true,
             })
         ).toEqual({
             previousBalance: 25,
@@ -73,7 +73,7 @@ describe('resolveWholesaleCheckoutAmounts', () => {
             discount: 0,
             previousBalance: -810,
             payments: { credit: 2625 },
-            isWalkInAccount: false,
+            carryAccountBalance: true,
         });
         expect(previousBalance).toBe(-810);
         expect(amountDue).toBe(2625);
@@ -86,7 +86,7 @@ describe('resolveWholesaleCheckoutAmounts', () => {
             discount: 0,
             previousBalance: 34.48,
             payments: { credit: 64.48 },
-            isWalkInAccount: true,
+            carryAccountBalance: false,
         });
         expect(previousBalance).toBe(0);
         expect(amountDue).toBe(30);
@@ -99,7 +99,7 @@ describe('resolveWholesaleCheckoutAmounts', () => {
             discount: 0,
             previousBalance: -13.52,
             payments: { credit: 0 },
-            isWalkInAccount: true,
+            carryAccountBalance: false,
         });
         expect(previousBalance).toBe(0);
         expect(amountDue).toBe(8);
@@ -112,7 +112,7 @@ describe('resolveWholesaleCheckoutAmounts', () => {
             discount: 0,
             previousBalance: 34.48,
             payments: { card: 64.48, credit: 0 },
-            isWalkInAccount: true,
+            carryAccountBalance: false,
         });
         expect(paidInFull.amountDue).toBe(0);
         expect(paidInFull.payments.credit).toBe(0);
@@ -122,8 +122,19 @@ describe('resolveWholesaleCheckoutAmounts', () => {
             discount: 0,
             previousBalance: 34.48,
             payments: { credit: 64.48 },
-            isWalkInAccount: true,
+            carryAccountBalance: false,
         });
         expect(unpaid.payments.credit).toBe(30);
+    });
+
+    it('carries the balance by default, so an unset flag keeps today behaviour', () => {
+        const { previousBalance, amountDue } = resolveWholesaleCheckoutAmounts({
+            total: 100,
+            discount: 0,
+            previousBalance: 25,
+            payments: {},
+        });
+        expect(previousBalance).toBe(25);
+        expect(amountDue).toBe(125);
     });
 });
