@@ -19,6 +19,7 @@
  * Usage:
  *   node src/scripts/repair-moved-invoice-ledger.js --tenant tbm            # dry run, one tenant
  *   node src/scripts/repair-moved-invoice-ledger.js --tenant tbm --apply    # write changes
+ *   node src/scripts/repair-moved-invoice-ledger.js --tenant tbm --invoice INV-001927 --apply  # one invoice
  *   node src/scripts/repair-moved-invoice-ledger.js                         # dry run, all tenants
  * Requires: MONGODB_URI
  */
@@ -41,16 +42,17 @@ const money = (n) => `£${round2(n).toFixed(2)}`;
 const sum = (rows) => round2(rows.reduce((s, e) => s + (Number(e.amount) || 0), 0));
 
 function parseArgs(argv) {
-    const args = { apply: false, tenant: null };
+    const args = { apply: false, tenant: null, invoices: [] };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--apply') args.apply = true;
         else if (argv[i] === '--tenant') args.tenant = argv[++i];
+        else if (argv[i] === '--invoice') args.invoices.push(...String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean));
     }
     return args;
 }
 
-/** Plans every change for the current tenant without writing. */
-async function planTenant() {
+/** Plans every change for the current tenant without writing. `invoices` limits it to those references. */
+async function planTenant(invoices = []) {
     const plan = {
         ledger: [],          // LedgerEntry docs to create
         balances: new Map(), // customerId -> Customer.balance delta
@@ -82,7 +84,9 @@ async function planTenant() {
         return names.get(k);
     };
 
-    const sales = await Sale.find({ _id: { $in: movedIds.filter(Boolean) }, type: 'wholesale', status: { $ne: 'voided' } })
+    const saleQuery = { _id: { $in: movedIds.filter(Boolean) }, type: 'wholesale', status: { $ne: 'voided' } };
+    if (invoices.length) saleQuery.reference = { $in: invoices };
+    const sales = await Sale.find(saleQuery)
         .select('reference customerId total discount payments previousBalance amountDue')
         .lean();
     for (const sale of sales) {
@@ -220,12 +224,13 @@ async function run() {
         tenantDbs = [wanted];
     }
     console.log(args.apply ? 'APPLY — writing changes' : 'DRY RUN — nothing will be written (pass --apply to write)');
+    if (args.invoices.length) console.log(`Only invoices: ${args.invoices.join(', ')}`);
 
     for (const dbName of tenantDbs) {
         const tenantId = dbName.slice(prefix.length);
         const tenantDb = mongoose.connection.useDb(dbName, { useCache: true });
         await tenantContext.run({ tenantDb, tenantId }, async () => {
-            const plan = await planTenant();
+            const plan = await planTenant(args.invoices);
             if (plan.notes.length === 0 && plan.warnings.length === 0) {
                 console.log(`\n[${tenantId}] nothing to repair`);
                 return;
