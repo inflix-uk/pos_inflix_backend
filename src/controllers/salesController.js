@@ -67,8 +67,8 @@ async function resolveWholesaleSaleAccount(accountId, tenantId) {
     return null;
 }
 
-/** Apply or reverse wholesale sale customer ledger (+balance / sale + payment_in rows). sign: 1 apply, -1 reverse. */
-async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel, userId, sign) {
+/** Post a wholesale sale to the customer account it was moved to (+balance / sale + payment_in rows). */
+async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel, userId) {
     if (!accountId || accountModel !== 'Customer') return;
     const orderTotal = round2(Number(sale.total) || 0);
     const discount = round2(Number(sale.discount) || 0);
@@ -77,10 +77,9 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
     const paidNow = round2(
         (Number(p.cash) || 0) + (Number(p.card) || 0) + (Number(p.bank) || 0)
     );
-    const balanceChange = round2(sign * (netDue - paidNow));
+    const balanceChange = round2(netDue - paidNow);
     const refLabel = sale.reference || `Sale ${sale._id}`;
     const now = new Date();
-    const labelSuffix = sign < 0 ? 'Customer changed (removed)' : 'Customer changed (assigned)';
 
     await Customer.findByIdAndUpdate(accountId, { $inc: { balance: balanceChange } });
 
@@ -90,9 +89,9 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
             accountId,
             accountModel: 'Customer',
             type: 'sale',
-            amount: round2(sign * netDue),
+            amount: netDue,
             referenceId: sale._id,
-            referenceLabel: `${labelSuffix} - ${refLabel}`,
+            referenceLabel: `Customer changed (assigned) - ${refLabel}`,
             date: now,
             occurredAt: now,
             createdBy: userId
@@ -107,7 +106,7 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
             accountId,
             accountModel: 'Customer',
             type: 'payment_in',
-            amount: round2(sign * -cashAmt),
+            amount: round2(-cashAmt),
             referenceId: sale._id,
             referenceLabel: `${refLabel} payment`,
             date: now,
@@ -122,7 +121,7 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
             accountId,
             accountModel: 'Customer',
             type: 'payment_in',
-            amount: round2(sign * -cardAmt),
+            amount: round2(-cardAmt),
             referenceId: sale._id,
             referenceLabel: `${refLabel} payment`,
             date: now,
@@ -137,7 +136,7 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
             accountId,
             accountModel: 'Customer',
             type: 'payment_in',
-            amount: round2(sign * -bankAmt),
+            amount: round2(-bankAmt),
             referenceId: sale._id,
             referenceLabel: `${refLabel} payment`,
             date: now,
@@ -146,6 +145,64 @@ async function postWholesaleCustomerLedgerForSale(sale, accountId, accountModel,
             createdBy: userId
         });
     }
+}
+
+/**
+ * Take a wholesale sale off the customer account it was moved away from. Reverses the lines the
+ * sale actually left there (invoice, edit adjustments, payments) rather than re-deriving them from
+ * the sale, which by now carries the edited total and payments.
+ */
+async function removeWholesaleSaleFromCustomerLedger(sale, accountId, userId) {
+    const entries = await LedgerEntry.find({
+        accountType: 'customer',
+        accountId,
+        referenceId: sale._id,
+        deletedAt: null
+    }).select('type amount paymentMethod').lean();
+
+    const groups = new Map();
+    for (const e of entries) {
+        const key = `${e.type}|${e.paymentMethod || ''}`;
+        const g = groups.get(key) || { type: e.type, paymentMethod: e.paymentMethod || '', amount: 0 };
+        g.amount = round2(g.amount + (Number(e.amount) || 0));
+        groups.set(key, g);
+    }
+
+    const refLabel = sale.reference || `Sale ${sale._id}`;
+    const now = new Date();
+    let balanceChange = 0;
+    for (const g of groups.values()) {
+        if (Math.abs(g.amount) < 0.005) continue;
+        balanceChange = round2(balanceChange - g.amount);
+        await LedgerEntry.create({
+            accountType: 'customer',
+            accountId,
+            accountModel: 'Customer',
+            type: g.type,
+            amount: round2(-g.amount),
+            referenceId: sale._id,
+            referenceLabel: g.type === 'payment_in'
+                ? `Customer changed (payment removed) - ${refLabel}`
+                : `Customer changed (removed) - ${refLabel}`,
+            date: now,
+            occurredAt: now,
+            paymentMethod: g.paymentMethod,
+            createdBy: userId
+        });
+    }
+    if (balanceChange !== 0) {
+        await Customer.findByIdAndUpdate(accountId, { $inc: { balance: balanceChange } });
+    }
+}
+
+/** Balance an account brings onto a wholesale invoice as "previous balance" (same rules as checkout). */
+async function wholesalePreviousBalanceFor(acct, tenantId) {
+    if (!acct?.hasCustomerLedger) return 0;
+    const settings = await GeneralSettings.getSettings();
+    if (settings.accountBalanceAtCheckoutEnabled === false) return 0;
+    const customer = await Customer.findOne({ _id: acct.id, tenantId }).select('balance isWalkIn').lean();
+    if (!customer || customer.isWalkIn) return 0;
+    return round2(Number(customer.balance) || 0);
 }
 
 /** Safe substring search for MongoDB $regex */
@@ -797,8 +854,9 @@ exports.updateSale = asyncHandler(async (req, res) => {
     if (sale.type === 'wholesale' && body.customerId !== undefined) {
         const newCustomerId = body.customerId ? String(body.customerId) : null;
         if (newCustomerId !== oldCustomerIdAtStart) {
+            let acct = null;
             if (newCustomerId) {
-                const acct = await resolveWholesaleSaleAccount(newCustomerId, tenantId);
+                acct = await resolveWholesaleSaleAccount(newCustomerId, tenantId);
                 if (!acct) {
                     return res.status(400).json({ success: false, message: 'Customer or supplier account not found' });
                 }
@@ -808,6 +866,15 @@ exports.updateSale = asyncHandler(async (req, res) => {
                 sale.customerId = null;
                 sale.customerName = body.customerName ? String(body.customerName).trim() : null;
             }
+            // The previous balance (and the unpaid remainder built on it) was the old account's.
+            sale.previousBalance = await wholesalePreviousBalanceFor(acct, tenantId);
+            sale.amountDue = computeRemainingAmountDue({
+                total: sale.total,
+                discount: sale.discount,
+                previousBalance: sale.previousBalance,
+                payments: sale.payments,
+            });
+            sale.payments = { ...normalizePaymentBreakdown(sale.payments), credit: sale.amountDue };
             wholesaleCustomerTransferred = true;
             transferFromCustomerId = oldCustomerIdAtStart;
             transferToCustomerId = newCustomerId;
@@ -940,13 +1007,13 @@ exports.updateSale = asyncHandler(async (req, res) => {
         if (transferFromCustomerId) {
             const oldAcct = await resolveWholesaleSaleAccount(transferFromCustomerId, tenantId);
             if (oldAcct?.hasCustomerLedger) {
-                await postWholesaleCustomerLedgerForSale(sale, oldAcct.id, oldAcct.accountModel, userId, -1);
+                await removeWholesaleSaleFromCustomerLedger(sale, oldAcct.id, userId);
             }
         }
         if (transferToCustomerId) {
             const newAcct = await resolveWholesaleSaleAccount(transferToCustomerId, tenantId);
             if (newAcct?.hasCustomerLedger) {
-                await postWholesaleCustomerLedgerForSale(sale, newAcct.id, newAcct.accountModel, userId, 1);
+                await postWholesaleCustomerLedgerForSale(sale, newAcct.id, newAcct.accountModel, userId);
             }
         }
     }
@@ -1029,6 +1096,7 @@ exports.updateSale = asyncHandler(async (req, res) => {
     await invalidateSalesCaches(tenantId);
     await cache.bumpNs('paymentAccounts:list', tenantId);
     await cache.bumpNs('customers:list', tenantId);
+    await cache.bumpMany(['accounts:list', 'accounts:statement'], tenantId);
 
     res.status(200).json({
         success: true,
