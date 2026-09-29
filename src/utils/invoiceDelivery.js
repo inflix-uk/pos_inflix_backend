@@ -111,7 +111,7 @@ async function queuePdfForWhatsapp(req, res, doc) {
             attachment: { filename: safeFilename, mimetype: 'application/pdf', data: pdfBuffer },
             source: 'invoice',
             sourceRef: { invoiceId: doc._id, reference: doc.reference },
-            dedupeKey: whatsappQueue.invoiceDedupeKey(doc._id),
+            dedupeKey: whatsappQueue.invoiceDedupeKey(doc._id, doc.updatedAt),
             createdByUserId: req.user && req.user._id,
         });
         whatsappWorker.kick(tenantId);

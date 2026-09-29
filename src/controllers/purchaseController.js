@@ -10,6 +10,7 @@ const { buildVariantKey } = require('../utils/variantKeyUtils');
 const InventorySettings = require('../models/InventorySettings');
 const SoldSerial = require('../models/SoldSerial');
 const SerialHistory = require('../models/SerialHistory');
+const SerialIndex = require('../models/SerialIndex');
 const LedgerEntry = require('../models/LedgerEntry');
 const asyncHandler = require('../middleware/asyncHandler');
 const auditService = require('../services/auditService');
@@ -29,6 +30,7 @@ const { purchasePartyLabel } = require('../utils/supplierDisplay');
 const { normalizePurchaseItems } = require('../utils/normalizePurchaseItems');
 const { formatProductName } = require('../utils/formatProductName');
 const { preservePurchaseItemBrandModels } = require('../utils/preservePurchaseItemBrandModels');
+const { preservePurchaseItemSids, countNewImeis } = require('../utils/preservePurchaseItemSids');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
 
@@ -548,6 +550,52 @@ async function legacyFindInStockSerials(serials, tenantId) {
     }
     return results;
 }
+
+/**
+ * Refresh SerialIndex (and its Redis copy) for serials whose purchase line just changed (price
+ * edit, purchase edit). Status comes from the same lookup the sale scan uses, so a sold or
+ * returned serial on the edited line keeps its status — the scan trusts an in-stock index entry
+ * without re-checking sales — while in-stock serials pick up the new prices. Transfers and
+ * write-offs are only recorded in the index, so those serials keep their status too.
+ */
+const INDEX_ONLY_STATUSES = ['in_transfer', 'adjusted_out'];
+async function reindexSerialsFromPurchases(serials, tenantId) {
+    const list = [...new Set((serials || []).map((s) => serialIndexService.normalizeSerial(s)).filter(Boolean))];
+    for (let i = 0; i < list.length; i += 500) {
+        const chunk = list.slice(i, i + 500);
+        const [results, indexDocs] = await Promise.all([
+            legacyFindInStockSerials(chunk, tenantId),
+            SerialIndex.find({ tenantId, serial: { $in: chunk } }).select('serial status').lean(),
+        ]);
+        const indexStatus = new Map(indexDocs.map((d) => [d.serial, d.status]));
+        await Promise.all(results.map((r) => {
+            let write = null;
+            const held = indexStatus.get(r.serial);
+            if (r.status === 'in_stock' && INDEX_ONLY_STATUSES.includes(held)) {
+                write = serialIndexService.upsertSerialIndex(tenantId, {
+                    serial: r.serial,
+                    status: held,
+                    unitCost: r.product.unitCost,
+                    salePrice: r.product.price,
+                });
+            } else if (r.status === 'in_stock') {
+                write = serialIndexService.upsertFromResult(tenantId, r);
+            } else if (r.status === 'already_sold') {
+                // Status only — keep the product snapshot the sale recorded.
+                write = serialIndexService.upsertSerialIndex(tenantId, {
+                    serial: r.serial,
+                    status: 'sold',
+                    saleReferenceSnapshot: r.soldInfo ? r.soldInfo.reference : undefined,
+                    customerNameSnapshot: r.soldInfo ? r.soldInfo.customerName : undefined,
+                });
+            } else if (r.status === 'returned_to_supplier') {
+                write = serialIndexService.upsertSerialIndex(tenantId, { serial: r.serial, status: 'returned_to_supplier' });
+            }
+            return write ? write.catch(() => {}) : null;
+        }));
+    }
+}
+exports.reindexSerialsFromPurchases = reindexSerialsFromPurchases;
 
 // @desc    Batch find in-stock products by serial/IMEI (for bulk add to cart)
 // @route   POST /api/purchases/find-in-stock-serials
@@ -1372,6 +1420,8 @@ function flattenPurchasesToStockRows(purchases, soldSet, opts) {
                     rows.push({
                         ...base,
                         imei: imeiStr,
+                        // Prices live on the purchase line, so a price edit applies to every IMEI on it.
+                        lineImeiCount: imeis.length,
                         // Per-IMEI SID overrides the item-level legacy SID when present.
                         serialItemIdNumber: perImeiSid || base.serialItemIdNumber,
                         _searchable: baseSearchable + ' ' + imeiStr.toLowerCase(),
@@ -2027,6 +2077,10 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
             beforeSnapshot.items || []
         );
         req.body.items = preservedModels.items;
+        // The edit page doesn't send SIDs — carry them over by IMEI; IMEIs added now get new ones.
+        const newImeiCount = countNewImeis(req.body.items, beforeSnapshot.items || []);
+        const nextSidSeq = newImeiCount > 0 ? await getNextSerialItemIdNumber(tenantId) : null;
+        req.body.items = preservePurchaseItemSids(req.body.items, beforeSnapshot.items || [], nextSidSeq).items;
         recomputePurchaseAggregatesFromItems(req.body);
         const uniqueness = await validateUniqueBarcodeAndImei(req.body.items, req.params.id, tenantId);
         if (!uniqueness.valid) {
@@ -2049,36 +2103,11 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
         .populate('items.category', 'name')
         .populate('items.subCategory', 'name');
 
-    if (purchase.items && purchase.items.length > 0) {
-        for (let i = 0; i < purchase.items.length; i++) {
-            const it = purchase.items[i];
-            const imeis = Array.isArray(it.imeis) ? it.imeis : [];
-            for (const imei of imeis) {
-                const serial = serialIndexService.normalizeSerial(imei);
-                if (!serial) continue;
-                const parts = [it.brand, it.brandModel, it.capacity, it.colour].filter(Boolean);
-                const name = formatProductName(parts.length > 0 ? parts.join(' ') : (it.name && it.name.trim() ? it.name.trim() : 'Product'));
-                const skuSnapshot = `${purchase._id}-${it._id}`;
-                serialIndexService.upsertSerialIndex(tenantId, {
-                    serial,
-                    status: 'in_stock',
-                    productNameSnapshot: name,
-                    skuSnapshot,
-                    purchaseId: purchase._id,
-                    purchaseItemId: it._id,
-                    unitCost: Number(it.purchasePrice) || null,
-                    salePrice: Number(it.salePrice) || null,
-                    locationId: it.sendTo || null,
-                    purchaseDate: purchase.createdAt || purchase.date,
-                    grade: it.grade,
-                    colour: it.colour,
-                    brand: it.brand,
-                    brandModel: it.brandModel,
-                    capacity: it.capacity,
-                    category: (it.category && it.category.name) ? it.category.name : (typeof it.category === 'string' ? it.category : ''),
-                }).catch(() => {});
-            }
-        }
+    // Refresh SerialIndex for every IMEI now on the purchase. Sold / returned / moved IMEIs keep their status
+    // (an edit must not make a sold phone scannable again); in-stock ones pick up the edited prices.
+    const editedSerials = (purchase.items || []).flatMap((it) => (Array.isArray(it.imeis) ? it.imeis : []));
+    if (editedSerials.length > 0) {
+        reindexSerialsFromPurchases(editedSerials, tenantId).catch(() => {});
     }
 
     await auditService.logFromReq(req, 'Purchase', purchase._id, 'UPDATE', {
@@ -2087,8 +2116,14 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
     });
     await activityLogService.logParcelEvent(req, 'PARCEL_UPDATED', purchase, { before: beforeSnapshot });
 
+    // Same caches as create / item price edit — otherwise Products, create-sales search and the
+    // stock list keep showing the old prices until their caches expire.
     invalidateForSalesCache(tenantId);
+    invalidateTypeaheadCache(tenantId);
+    exports.invalidateStockPurchasesCache(tenantId);
+    exports.invalidateStockSerialSetCache(tenantId);
     await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
+    stockItemService.rebuildForPurchase(purchase).catch(() => {});
 
     const data = normalizePurchasesForResponse(purchase);
 
@@ -2151,6 +2186,8 @@ exports.updatePurchaseDetails = asyncHandler(async (req, res) => {
 
     invalidateForSalesCache(tenantId);
     invalidateTypeaheadCache(tenantId);
+    // Stock rows show the purchase's supplier and date.
+    exports.invalidateStockPurchasesCache(tenantId);
     await cache.bumpMany(['purchases:list', 'purchases:stock-list', 'paymentAccounts:list'], tenantId);
     stockItemService.rebuildForPurchase(updated).catch(() => {});
 
@@ -2264,37 +2301,12 @@ exports.updatePurchaseItemQuantity = asyncHandler(async (req, res) => {
     const purchase = await Purchase.findOne({ _id: purchaseId, tenantId });
     const item = (purchase?.items || []).find((i) => String(i._id) === String(itemId));
 
-    // When salePrice or purchasePrice was updated on a serial item, update SerialIndex (and Redis) in the background so the response returns fast.
-    // Serial lookup with no pricing group uses legacy (DB) for price, so the correct price is always from the purchase document.
+    // When salePrice or purchasePrice was updated on a serial item, refresh SerialIndex (and Redis) in the
+    // background so the response returns fast. Sold / returned / moved IMEIs on the same line keep their status.
     if ((salePrice !== null || purchasePrice !== null) && Array.isArray(item.imeis) && item.imeis.length > 0) {
-        const parts = [item.brand, item.brandModel, item.capacity, item.colour].filter(Boolean);
-        const productNameSnapshot = formatProductName(parts.length > 0 ? parts.join(' ') : (item.name && String(item.name).trim() ? String(item.name).trim() : 'Product'));
-        const skuSnapshot = `${purchase._id}-${item._id}`;
-        const payload = {
-            status: 'in_stock',
-            productNameSnapshot,
-            skuSnapshot,
-            purchaseId: purchase._id,
-            purchaseItemId: item._id,
-            unitCost: item.purchasePrice != null ? Number(item.purchasePrice) : null,
-            salePrice: Number(item.salePrice) || null,
-            locationId: item.sendTo || null,
-            purchaseDate: purchase.createdAt || purchase.date,
-            grade: item.grade,
-            colour: item.colour,
-            brand: item.brand,
-            brandModel: item.brandModel,
-            capacity: item.capacity,
-            category: (item.category && item.category.name) ? item.category.name : (typeof item.category === 'string' ? item.category : ''),
-        };
-        const tenant = tenantId;
-        const imeisList = item.imeis;
+        const imeisList = item.imeis.slice();
         setImmediate(() => {
-            imeisList.forEach((imei) => {
-                const serial = serialIndexService.normalizeSerial(imei);
-                if (!serial) return;
-                serialIndexService.upsertSerialIndex(tenant, { serial, ...payload }).catch(() => {});
-            });
+            reindexSerialsFromPurchases(imeisList, tenantId).catch(() => {});
         });
     }
 

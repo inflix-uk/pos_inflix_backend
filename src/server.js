@@ -242,9 +242,19 @@ function isTransientNetworkError(err) {
     const msg = (err && (err.message || err.toString())) || '';
     return TRANSIENT_REJECTION_PATTERNS.some((re) => re.test(msg));
 }
+// Boom errors only come from the WhatsApp library (Baileys), whose socket handlers can reject
+// when the WhatsApp connection drops ("Connection Closed", "Timed Out"). The session reconnects
+// on its own; restarting the API for every tenant would only cut the pairing off mid-write.
+function isWhatsappSocketError(err) {
+    return !!(err && err.isBoom);
+}
 process.on('unhandledRejection', (err) => {
     if (isTransientNetworkError(err)) {
         console.warn(`[unhandledRejection:transient] ${err.message} — keeping process alive`);
+        return;
+    }
+    if (isWhatsappSocketError(err)) {
+        console.warn(`[unhandledRejection:whatsapp] ${err.message} — keeping process alive`);
         return;
     }
     console.error(`Error: ${err && err.message ? err.message : err}`);
@@ -253,6 +263,10 @@ process.on('unhandledRejection', (err) => {
 process.on('uncaughtException', (err) => {
     if (isTransientNetworkError(err)) {
         console.warn(`[uncaughtException:transient] ${err.message} — keeping process alive`);
+        return;
+    }
+    if (isWhatsappSocketError(err)) {
+        console.warn(`[uncaughtException:whatsapp] ${err.message} — keeping process alive`);
         return;
     }
     console.error(`Uncaught: ${err && err.stack ? err.stack : err}`);
