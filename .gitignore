@@ -34,3 +34,6 @@ uploads/
 
 # Migration backups (contain live tenant data)
 scripts/backups/
+
+# WhatsApp pairing credentials — written at runtime per tenant, never commit
+data/
