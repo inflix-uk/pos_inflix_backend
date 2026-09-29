@@ -118,7 +118,9 @@ exports.getProduct = asyncHandler(async (req, res) => {
 // @access  Private
 exports.getSerialHistory = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
-    const serialNumber = (req.params.serialNumber || '').trim();
+    // Invisible characters (zero-width spaces, BOM) come along when a serial is pasted from
+    // WhatsApp / Excel; they are never part of a serial and would make the exact match miss.
+    const serialNumber = (req.params.serialNumber || '').replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').trim();
     if (!serialNumber) {
         return res.status(400).json({ success: false, message: 'Serial number is required' });
     }
@@ -386,14 +388,18 @@ exports.getSerialHistory = asyncHandler(async (req, res) => {
         'Expires': '0'
     });
     
+    // `found: false` = no purchase, sale or history has this exact serial (usually mistyped or mis-scanned),
+    // as opposed to a known serial that is out of stock. Status stays 'not_in_stock' for older clients.
+    const found = !hasNoRecords;
     res.status(200).json({
         success: true,
         serialNumber,
         status, // This will be 'not_in_stock' for random numbers
+        found,
         origin: origin || null,
         sales: sales || [],
         movements: movements || [],
-        data: { serialNumber, status, origin: origin || null, sales: sales || [], movements: movements || [] }
+        data: { serialNumber, status, found, origin: origin || null, sales: sales || [], movements: movements || [] }
     });
 });
 
