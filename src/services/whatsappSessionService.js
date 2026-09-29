@@ -6,6 +6,8 @@
 const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
+const runInTenant = require('../lib/runInTenant');
+const WhatsappMessage = require('../models/WhatsappMessage');
 
 let baileysModule = null;
 function loadBaileys() {
@@ -50,15 +52,105 @@ function clearStaleAuthIfUnpaired(dir) {
     if (!readPairedCreds(dir)) wipeAuthDir(dir);
 }
 
-const sessions = new Map(); // tenantId -> { sock, status, qrDataUrl, qrRaw, jid, startedAt, lastError, retries }
+const sessions = new Map(); // tenantId -> { sock, status, qrDataUrl, qrRaw, jid, startedAt, openedAt, lastError, retries, replacedCount }
+// tenantId -> promise of the session being created, so concurrent starts share one socket
+// (two sockets on the same auth make WhatsApp drop one with "connection replaced").
+const starting = new Map();
 
-async function startSession(tenantId) {
+// Baileys' pino-style logger: surface errors (stream errors, decrypt / re-send failures)
+// as one line each; everything below error level is dropped.
+function makeLogger(tenantKey) {
+    const log = (obj, msg) => {
+        const text = typeof obj === 'string' ? obj : (msg || '');
+        const err = obj && typeof obj === 'object' ? (obj instanceof Error ? obj : obj.err || obj.error) : null;
+        console.warn(`[whatsapp] tenant=${tenantKey} ${text}${err && err.message ? ` (${err.message})` : ''}`);
+    };
+    const logger = {
+        level: 'error',
+        fatal: log, error: log, warn() {}, info() {}, debug() {}, trace() {},
+        child() { return logger; },
+    };
+    return logger;
+}
+
+// Small TTL cache with Baileys' CacheStore interface (get / set / del / flushAll).
+function createTtlCache(ttlMs, maxEntries) {
+    const store = new Map();
+    return {
+        get(k) {
+            const entry = store.get(k);
+            if (!entry) return undefined;
+            if (entry.expiresAt < Date.now()) {
+                store.delete(k);
+                return undefined;
+            }
+            return entry.value;
+        },
+        set(k, value) {
+            store.delete(k);
+            store.set(k, { value, expiresAt: Date.now() + ttlMs });
+            if (store.size > maxEntries) store.delete(store.keys().next().value);
+        },
+        del(k) { store.delete(k); },
+        flushAll() { store.clear(); },
+    };
+}
+
+// Per-tenant retry counters, kept outside the socket so they survive reconnects and a
+// message can't be re-requested / re-sent forever (Baileys caps each at maxMsgRetryCount).
+const retryCounters = new Map();
+function retryCounterCache(tenantKey) {
+    if (!retryCounters.has(tenantKey)) retryCounters.set(tenantKey, createTtlCache(60 * 60 * 1000, 5000));
+    return retryCounters.get(tenantKey);
+}
+
+// Messages sent by this process, by `<tenant>:<WhatsApp message id>`. When a phone can't
+// decrypt a message (shown as "Waiting for this message") it asks for it again and Baileys
+// re-sends whatever getMessage returns; the DB copy covers restarts.
+const recentSent = createTtlCache(24 * 60 * 60 * 1000, 1000);
+
+async function getSentMessage(tenantKey, id) {
+    if (!id) return undefined;
+    const cached = recentSent.get(`${tenantKey}:${id}`);
+    if (cached) return cached;
+    try {
+        const doc = await runInTenant(tenantKey, () =>
+            WhatsappMessage.findOne({ providerMessageId: id }).select('+providerMessage')
+        );
+        if (!doc || !doc.providerMessage || !doc.providerMessage.length) return undefined;
+        return loadBaileys().proto.Message.decode(doc.providerMessage);
+    } catch (e) {
+        console.warn(`[whatsapp] tenant=${tenantKey} could not load message ${id} to send again: ${e.message}`);
+        return undefined;
+    }
+}
+
+// Only these mean the saved pairing can never log in again: the device was removed on the
+// phone / logged out (401), or the account can't use linked devices (411). Every other close,
+// including 500 (Baileys' code for any unrecognised stream or socket error), is a dropped
+// connection and must reconnect with the saved pairing.
+const TERMINAL_CLOSE_CODES = [401, 411];
+// 440: this pairing connected from somewhere else (e.g. the old and new server overlapping
+// during a deploy). WhatsApp keeps the newest connection; wait before taking it back so two
+// processes don't fight over it, and stop after repeated takeovers.
+const REPLACED_RETRY_DELAY_MS = 60 * 1000;
+const MAX_REPLACED_RETRIES = 5;
+// A connection that stayed open this long wasn't part of a takeover loop.
+const STABLE_CONNECTION_MS = 10 * 60 * 1000;
+
+function startSession(tenantId) {
     const key = String(tenantId || 'default');
     const existing = sessions.get(key);
     if (existing && (existing.status === 'connecting' || existing.status === 'qr' || existing.status === 'connected')) {
-        return existing;
+        return Promise.resolve(existing);
     }
+    if (starting.has(key)) return starting.get(key);
+    const pending = createSession(key, existing).finally(() => starting.delete(key));
+    starting.set(key, pending);
+    return pending;
+}
 
+async function createSession(key, existing) {
     const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = loadBaileys();
 
     const dir = sessionDir(key);
@@ -69,26 +161,20 @@ async function startSession(tenantId) {
     const { state, saveCreds } = await useMultiFileAuthState(dir);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
 
-    // No-op logger satisfies Baileys' pino interface without spamming app logs.
-    const noopLogger = {
-        level: 'silent',
-        fatal() {}, error() {}, warn() {}, info() {}, debug() {}, trace() {},
-        child() { return noopLogger; },
-    };
-
     const sock = makeWASocket({
         auth: state,
         version,
-        logger: noopLogger,
+        logger: makeLogger(key),
         printQRInTerminal: false,
         // Browsers.macOS('Desktop') sends a WA-recognised client string; custom arrays
         // sometimes get rejected by the pair-device flow ("Couldn't link device").
         browser: Browsers?.macOS ? Browsers.macOS('Desktop') : ['Mac OS', 'Desktop', '10.15.7'],
         markOnlineOnConnect: false,
         syncFullHistory: false,
+        getMessage: (msgKey) => getSentMessage(key, msgKey && msgKey.id),
+        msgRetryCounterCache: retryCounterCache(key),
     });
 
-    const prevRetries = existing?.retries || 0;
     const session = {
         sock,
         status: 'connecting',
@@ -96,12 +182,18 @@ async function startSession(tenantId) {
         qrRaw: null,
         jid: null,
         startedAt: Date.now(),
+        openedAt: null,
         lastError: null,
-        retries: prevRetries,
+        retries: existing?.retries || 0,
+        replacedCount: existing?.replacedCount || 0,
     };
     sessions.set(key, session);
 
-    sock.ev.on('creds.update', saveCreds);
+    // Saving can fail if the auth folder was removed under a closing socket (logout);
+    // an unhandled rejection here would take the whole API down.
+    sock.ev.on('creds.update', () => {
+        saveCreds().catch((e) => console.warn(`[whatsapp] tenant=${key} could not save credentials: ${e.message}`));
+    });
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -120,29 +212,49 @@ async function startSession(tenantId) {
             session.qrRaw = null;
             session.jid = sock.user?.id || null;
             session.retries = 0;
+            session.openedAt = Date.now();
         }
         if (connection === 'close') {
             const code = lastDisconnect?.error?.output?.statusCode;
-            // Codes that mean the persisted auth is unusable — wipe and force a fresh QR.
-            const fatalCodes = new Set([
-                DisconnectReason.loggedOut,
-                DisconnectReason.badSession,
-                DisconnectReason.multideviceMismatch,
-                DisconnectReason.connectionReplaced,
-            ]);
-            const isFatal = fatalCodes.has(code);
             session.qrDataUrl = null;
             session.qrRaw = null;
             session.lastError = lastDisconnect?.error?.message || null;
+            const current = sessions.get(key) === session;
+            console.warn(
+                `[whatsapp] tenant=${key} connection closed (code ${code ?? 'none'}: ${session.lastError || 'no reason given'})`
+                + (current ? '' : ' — superseded socket, ignoring')
+            );
 
-            if (isFatal) {
+            if (TERMINAL_CLOSE_CODES.includes(code)) {
                 session.status = 'disconnected';
                 // A superseded socket (e.g. closing after a manual logout) must not
                 // delete or wipe a newer session the user has already started.
-                if (sessions.get(key) === session) {
+                if (current) {
                     sessions.delete(key);
                     wipeAuthDir(dir);
                 }
+                return;
+            }
+
+            if (code === DisconnectReason.connectionReplaced) {
+                session.status = 'disconnected';
+                // The pairing is still valid (another connection is using it) — never wipe it.
+                if (!current) return;
+                const stable = session.openedAt && Date.now() - session.openedAt >= STABLE_CONNECTION_MS;
+                const replacedCount = (stable ? 0 : session.replacedCount || 0) + 1;
+                if (replacedCount > MAX_REPLACED_RETRIES) {
+                    // Left in place as 'disconnected' so the settings page shows why.
+                    session.lastError = 'WhatsApp was opened from another connection using this pairing. '
+                        + 'Press "Generate QR code" to reconnect here — the saved pairing is reused, no new scan needed.';
+                    return;
+                }
+                const carryRetries = session.retries || 0;
+                setTimeout(() => {
+                    if (sessions.get(key) !== session) return;
+                    sessions.set(key, { retries: carryRetries, replacedCount, status: 'restarting' });
+                    startSession(key).catch(() => {});
+                }, REPLACED_RETRY_DELAY_MS);
+                session.status = 'connecting';
                 return;
             }
 
@@ -169,7 +281,7 @@ async function startSession(tenantId) {
                 if (sessions.get(key) !== session) return;
                 // Carry the retry count forward via a shadow entry so the next
                 // startSession picks it up via `existing?.retries`.
-                sessions.set(key, { retries: carryRetries, status: 'restarting' });
+                sessions.set(key, { retries: carryRetries, replacedCount: session.replacedCount, status: 'restarting' });
                 startSession(key).catch(() => {});
             }, retryDelayMs);
         }
@@ -258,12 +370,25 @@ async function sendQueuedMessage(tenantId, { phone, text, attachment }) {
         }
         : { text };
 
+    let sent;
     try {
-        const sent = await s.sock.sendMessage(jid, content);
-        return { jid, providerMessageId: (sent && sent.key && sent.key.id) || null };
+        sent = await s.sock.sendMessage(jid, content);
     } catch (e) {
         throw codedError(e.message || 'WhatsApp send failed', 'WA_SEND_FAILED');
     }
+    const providerMessageId = (sent && sent.key && sent.key.id) || null;
+    // Keep what was sent so it can be re-sent if a phone asks for it again (see getSentMessage).
+    let providerMessage = null;
+    if (providerMessageId && sent.message) {
+        const key = String(tenantId || 'default');
+        recentSent.set(`${key}:${providerMessageId}`, sent.message);
+        try {
+            providerMessage = Buffer.from(loadBaileys().proto.Message.encode(sent.message).finish());
+        } catch (e) {
+            console.warn(`[whatsapp] tenant=${key} could not store sent message ${providerMessageId}: ${e.message}`);
+        }
+    }
+    return { jid, providerMessageId, providerMessage };
 }
 
 /** Reconnect every tenant that has a completed pairing on disk (called once at boot). */

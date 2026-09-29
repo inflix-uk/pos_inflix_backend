@@ -1897,7 +1897,7 @@ exports.getFindBySerial = asyncHandler(async (req, res) => {
 async function findSaleForDelivery(req) {
     const tenantId = getTenantIdFromReq(req);
     const sale = await Sale.findOne({ _id: req.params.id, tenantId })
-        .select('_id reference customerName total locationId')
+        .select('_id reference customerName total locationId updatedAt')
         .lean();
     if (!sale) return null;
     const userScope = getUserLocationScope(req.user);

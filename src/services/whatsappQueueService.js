@@ -55,8 +55,14 @@ function textDedupeKey(text) {
     return `text:${crypto.createHash('sha256').update(String(text).trim()).digest('hex')}`;
 }
 
-function invoiceDedupeKey(invoiceId) {
-    return `invoice:${invoiceId}`;
+/**
+ * An invoice is "the same message" only while it is unchanged: `updatedAt` is part of the
+ * key, so a double click is caught but an invoice edited after sending (items added) can be
+ * sent again straight away.
+ */
+function invoiceDedupeKey(invoiceId, updatedAt) {
+    const version = updatedAt ? new Date(updatedAt).getTime() : NaN;
+    return Number.isFinite(version) ? `invoice:${invoiceId}:${version}` : `invoice:${invoiceId}`;
 }
 
 function toSettingsDto(settings) {
@@ -173,6 +179,15 @@ function countRecipientSentToday(phone, now = new Date()) {
     return countSentSince(getLondonDayStart(now), { recipientPhone: phone });
 }
 
+/** Why a duplicate was refused, and for a sent one, when it can go again. */
+function duplicateMessage(duplicate, recipientPhone, settings, now = new Date()) {
+    if (duplicate.status !== 'sent') return `This is already queued for +${recipientPhone}`;
+    const sentAt = duplicate.sentAt ? new Date(duplicate.sentAt).getTime() : now.getTime();
+    const waitMinutes = Math.max(1, Math.ceil((sentAt + settings.duplicateWindowMinutes * 60 * 1000 - now.getTime()) / 60000));
+    return `This was already sent to +${recipientPhone} in the last ${settings.duplicateWindowMinutes} min. `
+        + `It can be sent again in ${waitMinutes} min, or straight away once it has been changed.`;
+}
+
 /**
  * Queue a message. Throws WhatsappQueueError for invalid input, duplicates
  * (409) or when the recipient's daily cap is already used up (429).
@@ -220,27 +235,34 @@ async function enqueueMessage({
             { status: { $in: ['pending', 'sending'] } },
             { status: 'sent', sentAt: { $gte: new Date(now.getTime() - settings.duplicateWindowMinutes * 60 * 1000) } },
         ],
-    }).select('status').lean();
+    }).select('status sentAt').lean();
     if (duplicate) {
-        throw new WhatsappQueueError(
-            duplicate.status === 'sent'
-                ? `This was already sent to +${recipientPhone} in the last ${settings.duplicateWindowMinutes} min`
-                : `This is already queued for +${recipientPhone}`,
-            'DUPLICATE',
-            409
-        );
+        throw new WhatsappQueueError(duplicateMessage(duplicate, recipientPhone, settings, now), 'DUPLICATE', 409);
     }
 
-    const [sentToday, queuedForRecipient] = await Promise.all([
+    // An earlier copy of this invoice still waiting to go out is replaced by this one, so the
+    // customer only gets the up-to-date invoice. It no longer counts towards the recipient's cap.
+    const supersededFilter = sourceRef && sourceRef.invoiceId
+        ? { recipientPhone, 'sourceRef.invoiceId': sourceRef.invoiceId, dedupeKey: { $ne: dedupeKey }, status: 'pending' }
+        : null;
+
+    const [sentToday, queuedForRecipient, supersededCount] = await Promise.all([
         countRecipientSentToday(recipientPhone, now),
         WhatsappMessage.countDocuments({ recipientPhone, status: { $in: ['pending', 'sending'] } }),
+        supersededFilter ? WhatsappMessage.countDocuments(supersededFilter) : 0,
     ]);
-    if (sentToday + queuedForRecipient >= settings.dailyCapPerRecipient) {
+    if (sentToday + queuedForRecipient - supersededCount >= settings.dailyCapPerRecipient) {
         throw new WhatsappQueueError(
             `Daily limit for +${recipientPhone} reached (${settings.dailyCapPerRecipient} messages per day). Try again tomorrow.`,
             'RECIPIENT_DAILY_CAP',
             429
         );
+    }
+    if (supersededFilter) {
+        await WhatsappMessage.updateMany(supersededFilter, {
+            $set: { status: 'cancelled', error: 'Replaced by an updated copy of this invoice' },
+            $unset: { 'attachment.data': 1 },
+        });
     }
 
     const doc = await WhatsappMessage.create({
@@ -352,13 +374,12 @@ function claimNextPending(now = new Date()) {
     );
 }
 
-function markSent(id, providerMessageId) {
+function markSent(id, providerMessageId, providerMessage) {
+    const $set = { status: 'sent', sentAt: new Date(), providerMessageId: providerMessageId || null };
+    if (providerMessage) $set.providerMessage = providerMessage;
     return WhatsappMessage.updateOne(
         { _id: id, status: 'sending' },
-        {
-            $set: { status: 'sent', sentAt: new Date(), providerMessageId: providerMessageId || null },
-            $unset: { 'attachment.data': 1, error: 1 },
-        }
+        { $set, $unset: { 'attachment.data': 1, error: 1 } }
     );
 }
 
@@ -420,6 +441,7 @@ module.exports = {
     getUsage,
     checkSendGate,
     countRecipientSentToday,
+    duplicateMessage,
     enqueueMessage,
     listMessages,
     cancelMessage,

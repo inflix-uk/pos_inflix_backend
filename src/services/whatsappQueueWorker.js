@@ -11,9 +11,7 @@
  * in-process too. Tenants are processed independently: a slow send for one
  * tenant never delays another.
  */
-const mongoose = require('mongoose');
-const config = require('../config');
-const tenantContext = require('../lib/tenantContext');
+const runInTenant = require('../lib/runInTenant');
 const whatsappSession = require('./whatsappSessionService');
 const queue = require('./whatsappQueueService');
 const WhatsappSettings = require('../models/WhatsappSettings');
@@ -25,14 +23,6 @@ const RETRY_BACKOFF_MS = 2 * 60 * 1000;
 
 let timer = null;
 const busyTenants = new Set();
-
-// Same DB resolution as middleware/tenantResolver, so the worker reads and writes
-// exactly the database the tenant's own requests use.
-function runInTenant(tenantId, fn) {
-    const dbName = (config.tenantDbPrefix || 'tenant_') + tenantId;
-    const tenantDb = mongoose.connection.useDb(dbName, { useCache: true });
-    return tenantContext.run({ tenantDb, tenantId }, fn);
-}
 
 async function deliver(tenantId, message, settings) {
     const sentToday = await queue.countRecipientSentToday(message.recipientPhone);
@@ -70,7 +60,7 @@ async function deliver(tenantId, message, settings) {
         return;
     }
 
-    await queue.markSent(message._id, result.providerMessageId);
+    await queue.markSent(message._id, result.providerMessageId, result.providerMessage);
     const delaySeconds = await queue.armNextDelay(settings);
     console.log(`[whatsapp-queue] tenant=${tenantId} message=${message._id} sent; next send in ${delaySeconds}s`);
 }

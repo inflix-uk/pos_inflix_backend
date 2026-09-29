@@ -35,6 +35,10 @@ const whatsappMessageSchema = new mongoose.Schema({
     lastAttemptAt: { type: Date },
     sentAt: { type: Date },
     providerMessageId: { type: String },
+    // The message as sent (encoded WhatsApp proto — media references only, not the file).
+    // When a recipient's or our own phone can't decrypt it, WhatsApp asks for it again
+    // and the session re-sends it from here; without it the chat stays on "Waiting for this message".
+    providerMessage: { type: Buffer, select: false },
     error: { type: String },
     blockedByRule: { type: String },
     createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -49,6 +53,8 @@ whatsappMessageSchema.index({ status: 1, sentAt: 1 });
 // Per-recipient daily cap and duplicate guard.
 whatsappMessageSchema.index({ recipientPhone: 1, status: 1, sentAt: 1 });
 whatsappMessageSchema.index({ recipientPhone: 1, dedupeKey: 1, status: 1 });
+// Re-sending a message WhatsApp asks for again.
+whatsappMessageSchema.index({ providerMessageId: 1 });
 // Queue list (newest first).
 whatsappMessageSchema.index({ createdAt: -1 });
 
