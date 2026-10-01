@@ -43,8 +43,11 @@
   ],
   "author": "Inflix",
   "license": "ISC",
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.17.16",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.9.0",
     "compression": "^1.8.1",

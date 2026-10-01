@@ -273,4 +273,25 @@ process.on('uncaughtException', (err) => {
     server.close(() => process.exit(1));
 });
 
+// A deploy stops the old container with SIGTERM. Close the WhatsApp sockets without logging
+// out (the pairing is saved in the database) so this process stops writing keys and never
+// takes the connection back from the new one, then let in-flight requests finish.
+let stopping = false;
+function shutdown(signal) {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal} received — shutting down`);
+    try {
+        require('./services/whatsappQueueWorker').stop();
+        require('./services/whatsappSessionService').shutdownSessions();
+    } catch (e) {
+        console.warn(`WhatsApp: shutdown failed (${e.message})`);
+    }
+    server.close(() => setTimeout(() => process.exit(0), 1000));
+    // Keep-alive connections can hold server.close() open; exit before Docker's kill timeout.
+    setTimeout(() => process.exit(0), 8000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 module.exports = app;
