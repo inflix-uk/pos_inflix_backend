@@ -2034,6 +2034,18 @@ exports.createPurchase = asyncHandler(async (req, res) => {
     });
 });
 
+/** The supplier statement dates a purchase by its ledger line (written at create), so move it with the purchase date. */
+async function syncPurchaseLedgerDate(purchaseId, beforeDate, afterDate) {
+    if (!afterDate) return;
+    const next = new Date(afterDate);
+    if (Number.isNaN(next.getTime())) return;
+    if (beforeDate && new Date(beforeDate).getTime() === next.getTime()) return;
+    await LedgerEntry.updateMany(
+        { referenceId: purchaseId, type: 'purchase', deletedAt: null },
+        { $set: { date: next } }
+    );
+}
+
 // @desc    Update purchase
 // @route   PUT /api/purchases/:id
 // @access  Private (admin, manager)
@@ -2109,6 +2121,7 @@ exports.updatePurchase = asyncHandler(async (req, res) => {
     if (editedSerials.length > 0) {
         reindexSerialsFromPurchases(editedSerials, tenantId).catch(() => {});
     }
+    await syncPurchaseLedgerDate(purchase._id, beforeSnapshot.date, purchase.date);
 
     await auditService.logFromReq(req, 'Purchase', purchase._id, 'UPDATE', {
         before: beforeSnapshot,
@@ -2177,6 +2190,7 @@ exports.updatePurchaseDetails = asyncHandler(async (req, res) => {
         .populate('items.tax', 'name rate type')
         .populate('items.category', 'name')
         .populate('items.subCategory', 'name');
+    await syncPurchaseLedgerDate(updated._id, beforeSnapshot.date, updated.date);
 
     await auditService.logFromReq(req, 'Purchase', updated._id, 'UPDATE', {
         before: beforeSnapshot,
