@@ -1,73 +1,43 @@
 /**
  * WhatsApp session manager — lightweight wrapper around Baileys for pairing
- * a tenant's WhatsApp account via QR. One in-process session per tenant; auth
- * is persisted on disk so the session survives restarts.
+ * a tenant's WhatsApp account via QR. One in-process session per tenant; the pairing
+ * is kept in the tenant database (services/whatsappAuthStore) so it survives restarts
+ * and redeploys.
  */
-const path = require('path');
-const fs = require('fs');
 const QRCode = require('qrcode');
 const runInTenant = require('../lib/runInTenant');
+const loadBaileys = require('../lib/loadBaileys');
 const WhatsappMessage = require('../models/WhatsappMessage');
-
-let baileysModule = null;
-function loadBaileys() {
-    if (baileysModule) return baileysModule;
-    try {
-        baileysModule = require('@whiskeysockets/baileys');
-    } catch (e) {
-        const err = new Error(
-            'WhatsApp gateway dependency not installed. Run `npm install @whiskeysockets/baileys` in pos_inflix_backend.'
-        );
-        err.code = 'WA_DEP_MISSING';
-        throw err;
-    }
-    return baileysModule;
-}
-
-const SESSIONS_ROOT = path.resolve(process.cwd(), 'data', 'whatsapp-sessions');
-function sessionDir(tenantId) {
-    return path.join(SESSIONS_ROOT, String(tenantId || 'default'));
-}
-
-function wipeAuthDir(dir) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-}
-
-// Baileys logs in with saved creds when `creds.me` is set and otherwise starts a new
-// QR registration. (`creds.registered` is only set by the pairing-code flow and stays
-// false for QR pairing, so it can't be used to detect a completed pair.)
-function readPairedCreds(dir) {
-    try {
-        const creds = JSON.parse(fs.readFileSync(path.join(dir, 'creds.json'), 'utf8'));
-        return creds && creds.me && creds.me.id ? creds : null;
-    } catch {
-        return null;
-    }
-}
-
-// If creds.json exists but the previous pair never completed, the saved state is
-// unusable. Wipe so the next start is a clean pair.
-function clearStaleAuthIfUnpaired(dir) {
-    if (!fs.existsSync(path.join(dir, 'creds.json'))) return;
-    if (!readPairedCreds(dir)) wipeAuthDir(dir);
-}
+const Tenant = require('../models/Tenant');
+const authStore = require('./whatsappAuthStore');
 
 const sessions = new Map(); // tenantId -> { sock, status, qrDataUrl, qrRaw, jid, startedAt, openedAt, lastError, retries, replacedCount }
 // tenantId -> promise of the session being created, so concurrent starts share one socket
 // (two sockets on the same auth make WhatsApp drop one with "connection replaced").
 const starting = new Map();
+// Set when the process is stopping (deploy / restart): sockets are closed without logging
+// out and nothing reconnects, so the next process can take the pairing over cleanly.
+let shuttingDown = false;
 
-// Baileys' pino-style logger: surface errors (stream errors, decrypt / re-send failures)
-// as one line each; everything below error level is dropped.
+// Baileys' pino-style logger. Errors and warnings (stream errors, decrypt failures, key-store
+// commits) are logged, plus the info/debug lines about messages a phone asked to be sent again
+// — without those, "Waiting for this message" on a phone leaves no trace in the server log.
+const RETRY_LOG_PATTERN = /retry|resend|send again|decrypt|not available|identity (key )?changed|reg id mismatch|own lid session|pre-?keys? (found|upload)|(uploading|uploaded) pre-?keys/i;
 function makeLogger(tenantKey) {
     const log = (obj, msg) => {
         const text = typeof obj === 'string' ? obj : (msg || '');
         const err = obj && typeof obj === 'object' ? (obj instanceof Error ? obj : obj.err || obj.error) : null;
-        console.warn(`[whatsapp] tenant=${tenantKey} ${text}${err && err.message ? ` (${err.message})` : ''}`);
+        const attrs = obj && typeof obj === 'object' && !(obj instanceof Error) ? obj.attrs : null;
+        const from = attrs ? ` from=${attrs.from || ''}${attrs.participant ? ` participant=${attrs.participant}` : ''}` : '';
+        console.warn(`[whatsapp] tenant=${tenantKey} ${text}${from}${err && err.message ? ` (${err.message})` : ''}`);
+    };
+    const logIfRetry = (obj, msg) => {
+        const text = typeof obj === 'string' ? obj : (msg || '');
+        if (RETRY_LOG_PATTERN.test(text)) log(obj, msg);
     };
     const logger = {
-        level: 'error',
-        fatal: log, error: log, warn() {}, info() {}, debug() {}, trace() {},
+        level: 'debug',
+        fatal: log, error: log, warn: log, info: logIfRetry, debug: logIfRetry, trace() {},
         child() { return logger; },
     };
     return logger;
@@ -118,7 +88,7 @@ async function getSentMessage(tenantKey, id) {
             WhatsappMessage.findOne({ providerMessageId: id }).select('+providerMessage')
         );
         if (!doc || !doc.providerMessage || !doc.providerMessage.length) return undefined;
-        return loadBaileys().proto.Message.decode(doc.providerMessage);
+        return (await loadBaileys()).proto.Message.decode(doc.providerMessage);
     } catch (e) {
         console.warn(`[whatsapp] tenant=${tenantKey} could not load message ${id} to send again: ${e.message}`);
         return undefined;
@@ -140,6 +110,9 @@ const STABLE_CONNECTION_MS = 10 * 60 * 1000;
 
 function startSession(tenantId) {
     const key = String(tenantId || 'default');
+    if (shuttingDown) {
+        return Promise.reject(codedError('The server is restarting — try again in a minute.', 'WA_SHUTTING_DOWN'));
+    }
     const existing = sessions.get(key);
     if (existing && (existing.status === 'connecting' || existing.status === 'qr' || existing.status === 'connected')) {
         return Promise.resolve(existing);
@@ -151,21 +124,22 @@ function startSession(tenantId) {
 }
 
 async function createSession(key, existing) {
-    const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = loadBaileys();
+    const baileys = await loadBaileys();
+    const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, Browsers, makeCacheableSignalKeyStore } = baileys;
 
-    const dir = sessionDir(key);
-    fs.mkdirSync(dir, { recursive: true });
-    // Only wipe stale auth on a fresh start (no `existing` carry-over) — never during
-    // an internal retry, which may be finishing a pair that's still in progress.
-    if (!existing) clearStaleAuthIfUnpaired(dir);
-    const { state, saveCreds } = await useMultiFileAuthState(dir);
+    // A saved pair that never completed is unusable: clear it so this start is a clean pair.
+    // Only on a fresh start (no `existing` carry-over) — never during an internal retry,
+    // which may be finishing a pair that's still in progress.
+    if (!existing && !(await authStore.hasPairedCreds(key))) await authStore.clearAuth(key);
+    const { state, saveCreds } = await authStore.useMongoAuthState(key, baileys);
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
+    const logger = makeLogger(key);
 
     const sock = makeWASocket({
-        auth: state,
+        // Keys are read on every send / receive: keep a memory cache in front of the DB.
+        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
         version,
-        logger: makeLogger(key),
-        printQRInTerminal: false,
+        logger,
         // Browsers.macOS('Desktop') sends a WA-recognised client string; custom arrays
         // sometimes get rejected by the pair-device flow ("Couldn't link device").
         browser: Browsers?.macOS ? Browsers.macOS('Desktop') : ['Mac OS', 'Desktop', '10.15.7'],
@@ -189,11 +163,17 @@ async function createSession(key, existing) {
     };
     sessions.set(key, session);
 
-    // Saving can fail if the auth folder was removed under a closing socket (logout);
-    // an unhandled rejection here would take the whole API down.
+    // Once the pairing has been cleared (logged out / removed on the phone / failed pair), a late
+    // creds.update from the closing socket must not write it back. A failed save must not
+    // become an unhandled rejection, which would take the whole API down.
     sock.ev.on('creds.update', () => {
+        if (session.authCleared) return;
         saveCreds().catch((e) => console.warn(`[whatsapp] tenant=${key} could not save credentials: ${e.message}`));
     });
+    const clearPairing = () => {
+        session.authCleared = true;
+        authStore.clearAuth(key).catch((e) => console.warn(`[whatsapp] tenant=${key} could not clear the pairing: ${e.message}`));
+    };
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -225,13 +205,19 @@ async function createSession(key, existing) {
                 + (current ? '' : ' — superseded socket, ignoring')
             );
 
+            // Closed by shutdownSessions(): the pairing stays saved for the next process.
+            if (shuttingDown) {
+                session.status = 'disconnected';
+                return;
+            }
+
             if (TERMINAL_CLOSE_CODES.includes(code)) {
                 session.status = 'disconnected';
                 // A superseded socket (e.g. closing after a manual logout) must not
                 // delete or wipe a newer session the user has already started.
                 if (current) {
                     sessions.delete(key);
-                    wipeAuthDir(dir);
+                    clearPairing();
                 }
                 return;
             }
@@ -250,7 +236,7 @@ async function createSession(key, existing) {
                 }
                 const carryRetries = session.retries || 0;
                 setTimeout(() => {
-                    if (sessions.get(key) !== session) return;
+                    if (shuttingDown || sessions.get(key) !== session) return;
                     sessions.set(key, { retries: carryRetries, replacedCount, status: 'restarting' });
                     startSession(key).catch(() => {});
                 }, REPLACED_RETRY_DELAY_MS);
@@ -268,7 +254,7 @@ async function createSession(key, existing) {
                 session.status = 'disconnected';
                 session.lastError = 'WhatsApp pairing failed repeatedly — try again to generate a fresh QR.';
                 sessions.delete(key);
-                wipeAuthDir(dir);
+                clearPairing();
                 return;
             }
             session.status = 'connecting';
@@ -277,8 +263,8 @@ async function createSession(key, existing) {
                 ? Math.min(5000 * 2 ** Math.min(carryRetries - 1, 4), 60000)
                 : 1500;
             setTimeout(() => {
-                // Logged out (or replaced) while waiting — don't resurrect the session.
-                if (sessions.get(key) !== session) return;
+                // Logged out (or replaced) while waiting, or the server is stopping — don't resurrect the session.
+                if (shuttingDown || sessions.get(key) !== session) return;
                 // Carry the retry count forward via a shadow entry so the next
                 // startSession picks it up via `existing?.retries`.
                 sessions.set(key, { retries: carryRetries, replacedCount: session.replacedCount, status: 'restarting' });
@@ -307,11 +293,12 @@ function getStatus(tenantId) {
 async function logoutSession(tenantId) {
     const key = String(tenantId || 'default');
     const s = sessions.get(key);
+    if (s) s.authCleared = true;
     if (s?.sock) {
         try { await s.sock.logout(); } catch {}
     }
     sessions.delete(key);
-    try { fs.rmSync(sessionDir(key), { recursive: true, force: true }); } catch {}
+    await authStore.clearAuth(key);
     return { status: 'disconnected' };
 }
 
@@ -383,7 +370,7 @@ async function sendQueuedMessage(tenantId, { phone, text, attachment }) {
         const key = String(tenantId || 'default');
         recentSent.set(`${key}:${providerMessageId}`, sent.message);
         try {
-            providerMessage = Buffer.from(loadBaileys().proto.Message.encode(sent.message).finish());
+            providerMessage = Buffer.from((await loadBaileys()).proto.Message.encode(sent.message).finish());
         } catch (e) {
             console.warn(`[whatsapp] tenant=${key} could not store sent message ${providerMessageId}: ${e.message}`);
         }
@@ -391,25 +378,39 @@ async function sendQueuedMessage(tenantId, { phone, text, attachment }) {
     return { jid, providerMessageId, providerMessage };
 }
 
-/** Reconnect every tenant that has a completed pairing on disk (called once at boot). */
+/** Reconnect every tenant that has a completed pairing saved (called once at boot). */
 async function restoreSessions() {
-    let entries;
+    let tenantIds;
     try {
-        entries = fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true });
-    } catch {
+        const tenants = await Tenant.find({}).select('tenantId').lean();
+        tenantIds = tenants.map((t) => String(t.tenantId || '')).filter(Boolean);
+    } catch (e) {
+        console.warn(`[whatsapp] could not list tenants to restore sessions: ${e.message}`);
         return [];
     }
     const restored = [];
-    for (const entry of entries) {
-        if (!entry.isDirectory() || !readPairedCreds(path.join(SESSIONS_ROOT, entry.name))) continue;
+    for (const tenantId of tenantIds) {
         try {
-            await startSession(entry.name);
-            restored.push(entry.name);
+            if (!(await authStore.hasPairedCreds(tenantId))) continue;
+            await startSession(tenantId);
+            restored.push(tenantId);
         } catch (e) {
-            console.warn(`[whatsapp] could not restore session for tenant ${entry.name}: ${e.message}`);
+            console.warn(`[whatsapp] could not restore session for tenant ${tenantId}: ${e.message}`);
         }
     }
     return restored;
+}
+
+/**
+ * Close every socket without logging out (server stopping for a deploy / restart). The pairing
+ * stays saved, so the next process reconnects without a new scan; nothing here reconnects.
+ */
+function shutdownSessions() {
+    shuttingDown = true;
+    for (const s of sessions.values()) {
+        if (!s.sock) continue;
+        try { s.sock.end(undefined); } catch {}
+    }
 }
 
 module.exports = {
@@ -420,4 +421,5 @@ module.exports = {
     listConnectedTenants,
     sendQueuedMessage,
     restoreSessions,
+    shutdownSessions,
 };
