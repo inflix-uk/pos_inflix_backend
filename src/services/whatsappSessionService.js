@@ -7,8 +7,8 @@
 const QRCode = require('qrcode');
 const runInTenant = require('../lib/runInTenant');
 const loadBaileys = require('../lib/loadBaileys');
+const listTenantIds = require('../lib/listTenantIds');
 const WhatsappMessage = require('../models/WhatsappMessage');
-const Tenant = require('../models/Tenant');
 const authStore = require('./whatsappAuthStore');
 
 const sessions = new Map(); // tenantId -> { sock, status, qrDataUrl, qrRaw, jid, startedAt, openedAt, lastError, retries, replacedCount }
@@ -378,12 +378,14 @@ async function sendQueuedMessage(tenantId, { phone, text, attachment }) {
     return { jid, providerMessageId, providerMessage };
 }
 
-/** Reconnect every tenant that has a completed pairing saved (called once at boot). */
+/**
+ * Reconnect every tenant that has a completed pairing saved (called once at boot). Tenants come
+ * from the tenant databases, not the `tenants` collection, which does not list every shop.
+ */
 async function restoreSessions() {
     let tenantIds;
     try {
-        const tenants = await Tenant.find({}).select('tenantId').lean();
-        tenantIds = tenants.map((t) => String(t.tenantId || '')).filter(Boolean);
+        tenantIds = await listTenantIds();
     } catch (e) {
         console.warn(`[whatsapp] could not list tenants to restore sessions: ${e.message}`);
         return [];
