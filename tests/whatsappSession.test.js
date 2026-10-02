@@ -61,11 +61,12 @@ jest.mock('../src/services/whatsappAuthStore', () => {
 });
 // Run tenant work inline so the model mocks below are hit (no tenant DB connection).
 jest.mock('../src/lib/runInTenant', () => jest.fn((tenantId, fn) => fn()));
+jest.mock('../src/lib/listTenantIds', () => jest.fn(async () => []));
 
 const loadBaileys = require('../src/lib/loadBaileys');
+const listTenantIds = require('../src/lib/listTenantIds');
 const authStore = require('../src/services/whatsappAuthStore');
 const WhatsappMessage = require('../src/models/WhatsappMessage');
-const Tenant = require('../src/models/Tenant');
 const session = require('../src/services/whatsappSessionService');
 
 const { DisconnectReason, proto } = loadBaileys.fake;
@@ -99,7 +100,6 @@ afterEach(() => {
     jest.useRealTimers();
     warnSpy.mockRestore();
     delete WhatsappMessage.findOne;
-    delete Tenant.find;
 });
 
 describe('disconnects', () => {
@@ -328,7 +328,7 @@ describe('restoreSessions (boot)', () => {
     it('reconnects only the tenants with a completed pairing saved', async () => {
         const paired = pairedTenant();
         const neverPaired = `t${++tenantSeq}`;
-        Tenant.find = jest.fn(() => ({ select: () => ({ lean: async () => [{ tenantId: paired }, { tenantId: neverPaired }] }) }));
+        listTenantIds.mockResolvedValueOnce([paired, neverPaired]);
         const before = sockets.length;
 
         const restored = await session.restoreSessions();
@@ -337,7 +337,7 @@ describe('restoreSessions (boot)', () => {
     });
 
     it('a failing tenant lookup does not throw', async () => {
-        Tenant.find = jest.fn(() => ({ select: () => ({ lean: async () => { throw new Error('db down'); } }) }));
+        listTenantIds.mockRejectedValueOnce(new Error('db down'));
         await expect(session.restoreSessions()).resolves.toEqual([]);
     });
 });
