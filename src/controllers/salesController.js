@@ -744,11 +744,19 @@ exports.updateSale = asyncHandler(async (req, res) => {
             capacity: (i.capacity != null && String(i.capacity).trim()) ? String(i.capacity).trim() : '',
             unit_cost_at_sale: typeof i.unit_cost_at_sale === 'number' ? round2(i.unit_cost_at_sale) : undefined
         }));
-        const existingItems = sale.items || [];
+        // A line keeps the cost it was sold at, taken from the same line before the edit — matched
+        // by SKU (in order when a SKU repeats), never by position: removing or reordering a line
+        // would otherwise hand every later line its neighbour's cost and purchase link.
+        const existingBySku = new Map();
+        for (const item of sale.items || []) {
+            const sku = String(item.sku || '');
+            if (!existingBySku.has(sku)) existingBySku.set(sku, []);
+            existingBySku.get(sku).push(item);
+        }
         const canOverrideCost = req.user && (req.user.role === 'admin' || (req.user.permissionKeys && req.user.permissionKeys.has('user.manage')));
         const resolved = await salesTransactionService.resolveCostsForSaleItems(newItems, sale.type || 'retail', null, getTenantIdFromReq(req));
         sale.items = newItems.map((i, idx) => {
-            const existing = existingItems[idx];
+            const existing = (existingBySku.get(String(i.sku || '')) || []).shift();
             const fromResolve = resolved[idx];
             let unit_cost_at_sale = 0;
             let cost_missing = false;
