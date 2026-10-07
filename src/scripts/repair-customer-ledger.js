@@ -24,6 +24,12 @@
  * Usage:
  *   node src/scripts/repair-customer-ledger.js --tenant fonewarehouse           # dry run, one tenant
  *   node src/scripts/repair-customer-ledger.js --tenant fonewarehouse --apply   # write changes
+ *   node src/scripts/repair-customer-ledger.js --tenant fonewarehouse --invoice INV-000002 --apply
+ *       # post the missed payments of these invoices only (comma-separated). Use it when a missed
+ *       # payment may already have been settled by hand on the account: posting it again would
+ *       # leave the customer in credit, so check the "will be" balances in the dry run first.
+ *   node src/scripts/repair-customer-ledger.js --tenant fonewarehouse --no-payments --apply
+ *       # post no payments: only clear the stale "Balance to pay" figures (and discount repairs)
  *   node src/scripts/repair-customer-ledger.js                                  # dry run, all tenants
  * Requires: MONGODB_URI
  */
@@ -48,16 +54,21 @@ const money = (n) => `£${round2(n).toFixed(2)}`;
 const day = (d) => new Date(d).toISOString().replace('T', ' ').slice(0, 16);
 
 function parseArgs(argv) {
-    const args = { apply: false, tenant: null };
+    const args = { apply: false, tenant: null, invoices: [], skipPayments: false };
     for (let i = 0; i < argv.length; i++) {
         if (argv[i] === '--apply') args.apply = true;
         else if (argv[i] === '--tenant') args.tenant = argv[++i];
+        else if (argv[i] === '--no-payments') args.skipPayments = true;
+        else if (argv[i] === '--invoice') args.invoices.push(...String(argv[++i] || '').split(',').map((s) => s.trim()).filter(Boolean));
     }
     return args;
 }
 
-/** Plans every change for the current tenant without writing. */
-async function planTenant(tenantId) {
+/**
+ * Plans every change for the current tenant without writing. `invoices` limits the run to the
+ * missed payments of those references (and what follows from them); `skipPayments` posts none.
+ */
+async function planTenant(tenantId, { invoices = [], skipPayments = false } = {}) {
     const plan = {
         ledger: [],          // LedgerEntry docs to create
         pots: [],            // PaymentLedgerEntry docs to create
@@ -95,6 +106,7 @@ async function planTenant(tenantId) {
         'paymentHistory.0': { $exists: true }
     });
     for (const sale of withFollowUps) {
+        if (skipPayments || (invoices.length && !invoices.includes(sale.reference))) continue;
         const name = await customerName(sale.customerId);
         if (name == null) continue; // supplier account or deleted customer — no customer ledger
         const p = sale.payments || {};
@@ -193,7 +205,12 @@ async function planTenant(tenantId) {
 
     // "Take payment" lowered the amount due but left payments.credit (shown as "Balance to pay" /
     // "Due") at the old figure, so a paid invoice still said the customer owed it.
-    const paidLater = await Sale.find({ type: 'wholesale', status: { $ne: 'voided' }, 'paymentHistory.0': { $exists: true } });
+    const paidLater = await Sale.find({
+        type: 'wholesale',
+        status: { $ne: 'voided' },
+        'paymentHistory.0': { $exists: true },
+        ...(invoices.length ? { reference: { $in: invoices } } : {})
+    });
     for (const s of [...plan.sales.values(), ...paidLater]) {
         if (s.type !== 'wholesale') continue;
         const sale = plan.sales.get(String(s._id)) || s;
@@ -207,7 +224,11 @@ async function planTenant(tenantId) {
     }
 
     // ── 2. Discount deducted twice by the sales edit page ──
-    const discounted = await Sale.find({ status: { $ne: 'voided' }, discount: { $gt: 0 } });
+    const discounted = await Sale.find({
+        status: { $ne: 'voided' },
+        discount: { $gt: 0 },
+        ...(invoices.length ? { reference: { $in: invoices } } : {})
+    });
     for (const s of discounted) {
         const sale = plan.sales.get(String(s._id)) || s;
         const gross = round2((Number(sale.subtotal) || 0) + (Number(sale.tax) || 0));
@@ -293,12 +314,14 @@ async function run() {
         tenantDbs = [wanted];
     }
     console.log(args.apply ? 'APPLY — writing changes' : 'DRY RUN — nothing will be written (pass --apply to write)');
+    if (args.invoices.length) console.log(`Only invoices: ${args.invoices.join(', ')}`);
+    if (args.skipPayments) console.log('Posting no payments');
 
     for (const dbName of tenantDbs) {
         const tenantId = dbName.slice(prefix.length);
         const tenantDb = mongoose.connection.useDb(dbName, { useCache: true });
         await tenantContext.run({ tenantDb, tenantId }, async () => {
-            const plan = await planTenant(tenantId);
+            const plan = await planTenant(tenantId, args);
             if (plan.notes.length === 0 && plan.warnings.length === 0) {
                 console.log(`\n[${tenantId}] nothing to repair`);
                 return;
