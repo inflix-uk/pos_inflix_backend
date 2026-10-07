@@ -2003,6 +2003,13 @@ exports.takePayment = asyncHandler(async (req, res) => {
     if (currentDue > 0) {
         sale.amountDue = round2(Math.max(0, currentDue - applied));
     }
+    // payments.credit is the part still owed (shown as "Balance to pay" / "Due"): lower it with
+    // the payment, or a fully paid invoice keeps saying the customer owes it.
+    if (movesMoney) {
+        sale.payments.credit = currentDue > 0
+            ? sale.amountDue
+            : round2(Math.max(0, (Number(sale.payments.credit) || 0) - applied));
+    }
     sale.paymentHistory = Array.isArray(sale.paymentHistory) ? sale.paymentHistory : [];
     sale.paymentHistory.push({
         amount: applied,

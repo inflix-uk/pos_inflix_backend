@@ -8,6 +8,9 @@
  *     → Posts the missing payment lines (dated when the payment was taken), lowers the balance,
  *       adds the pot IN entries, and lowers the previous balance / amount due on later invoices
  *       that were created while the payment was missing.
+ *     "Take payment" also left the invoice's "Balance to pay" (payments.credit) at the old
+ *     figure, so a paid invoice still showed as due.
+ *     → Sets it to the invoice's remaining amount due.
  *
  *  2. Saving an invoice from the sales edit page stored `total` with the discount already taken
  *     off, so the discount was deducted twice (910 − 90 shown as 730) and the account got a
@@ -186,6 +189,21 @@ async function planTenant(tenantId) {
             sale.amountDue = round2(Math.max(0, before.due - correction));
             plan.notes.push(`Prev bal  ${sale.reference} · ${await customerName(customerId)}: previous balance ${money(before.prev)} → ${money(sale.previousBalance)}, amount due ${money(before.due)} → ${money(sale.amountDue)}`);
         }
+    }
+
+    // "Take payment" lowered the amount due but left payments.credit (shown as "Balance to pay" /
+    // "Due") at the old figure, so a paid invoice still said the customer owed it.
+    const paidLater = await Sale.find({ type: 'wholesale', status: { $ne: 'voided' }, 'paymentHistory.0': { $exists: true } });
+    for (const s of [...plan.sales.values(), ...paidLater]) {
+        if (s.type !== 'wholesale') continue;
+        const sale = plan.sales.get(String(s._id)) || s;
+        const credit = round2(sale.payments && sale.payments.credit);
+        const due = round2(sale.amountDue);
+        if (credit - due < EPS) continue;
+        trackSale(sale);
+        sale.payments.credit = due;
+        const name = sale.customerId ? await customerName(sale.customerId) : null;
+        plan.notes.push(`To pay    ${sale.reference} · ${name || sale.customerName || 'no account'}: balance to pay ${money(credit)} → ${money(due)}`);
     }
 
     // ── 2. Discount deducted twice by the sales edit page ──
