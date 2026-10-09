@@ -942,6 +942,8 @@ exports.updateSale = asyncHandler(async (req, res) => {
             await SerialHistory.insertMany(removedHistoryDocs);
             await SoldSerial.deleteMany({ saleId: sale._id, serialNumber: { $in: removedSerials } });
             await refreshSerialIndexForSerials(tenantId, removedSerials);
+            // Serial Products and the sale search read the StockItem index: put the units back there too.
+            stockItemService.markInStock(removedSerials, tenantId).catch(() => {});
         }
 
         // Remove added serials from inventory (insert SoldSerial); validate not already sold elsewhere; log history
@@ -954,7 +956,24 @@ exports.updateSale = asyncHandler(async (req, res) => {
             }
             const existingOnThisSale = await SoldSerial.findOne({ serialNumber: serial, saleId: sale._id, status: { $ne: 'returned' } }).lean();
             if (!existingOnThisSale) {
-                await SoldSerial.create({ serialNumber: serial, saleId: sale._id, soldAt: new Date() });
+                // One SoldSerial row per serial (unique index). A unit that was sold before and
+                // returned to stock still has its row, so selling it again takes that row over —
+                // create() failed on the duplicate after the invoice was already saved, leaving the
+                // unit on the invoice but still in stock (and skipping the serials after it).
+                await SoldSerial.findOneAndUpdate(
+                    { serialNumber: serial },
+                    {
+                        $set: {
+                            saleId: sale._id,
+                            status: 'sold',
+                            soldAt: new Date(),
+                            returnDestination: null,
+                            returnedAt: null,
+                            salesReturnId: null,
+                        },
+                    },
+                    { upsert: true, new: true, setDefaultsOnInsert: true }
+                );
                 await SerialHistory.create({
                     serialNumber: serial,
                     eventType: 'sold',
@@ -971,6 +990,14 @@ exports.updateSale = asyncHandler(async (req, res) => {
                     customerNameSnapshot: customerName,
                 }).catch(() => {});
             }
+        }
+        if (addedSerials.length > 0) {
+            stockItemService.markSold(addedSerials, {
+                tenantId,
+                saleId: sale._id,
+                customerName,
+                saleReference: refLabel,
+            }).catch(() => {});
         }
 
         // Quantity diff by sku (Product + non-serial Purchase items)
