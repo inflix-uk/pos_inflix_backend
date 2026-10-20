@@ -38,7 +38,11 @@ const notesTermsValidation = [
     body('paymentNote')
         .optional()
         .isLength({ max: 2000 })
-        .withMessage('Payment note cannot exceed 2000 characters')
+        .withMessage('Payment note cannot exceed 2000 characters'),
+    body('tradeInTerms')
+        .optional()
+        .isLength({ max: 5000 })
+        .withMessage('Trade-in terms cannot exceed 5000 characters')
 ];
 
 router.route('/')

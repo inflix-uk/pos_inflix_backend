@@ -27,6 +27,7 @@ function applyNotesTermsFields(settings, body, userId, { isCreate = false } = {}
         invoicePdfPrint,
         businessInvoicePdfPrint,
         businessInvoiceTerms,
+        tradeInTerms,
         a4InvoiceTemplate
     } = body;
 
@@ -57,6 +58,7 @@ function applyNotesTermsFields(settings, body, userId, { isCreate = false } = {}
         settings.markModified('businessInvoicePdfPrint');
     }
     if (businessInvoiceTerms !== undefined) settings.businessInvoiceTerms = businessInvoiceTerms;
+    if (tradeInTerms !== undefined) settings.tradeInTerms = tradeInTerms;
     if (a4InvoiceTemplate !== undefined) settings.a4InvoiceTemplate = a4InvoiceTemplate;
 
     if (isCreate) {

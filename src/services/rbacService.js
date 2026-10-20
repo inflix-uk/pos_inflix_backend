@@ -22,6 +22,7 @@ const ALL_PERMISSION_KEYS = [
     'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
     'settings.view', 'settings.edit', 'settings.manage', 'settings.printing', 'settings.sales_mode',
     'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
+    'tradein.view', 'tradein.create',
     'expense_category.view', 'expense_category.manage',
     'expense.view', 'expense.create', 'expense.edit_draft', 'expense.submit',
     'expense.approve', 'expense.mark_paid', 'expense.void', 'expense.delete', 'expense.export',

@@ -19,6 +19,7 @@ module.exports = {
     purchaseReturns: { get: ['purchase.return'], post: ['purchase.return'], put: ['purchase.return'], delete: ['purchase.return'] },
     // Repairs
     repairs: { get: ['repair.view'], post: ['repair.create'], put: ['repair.edit'], delete: ['repair.delete'] },
+    'trade-ins': { get: ['tradein.view', 'tradein.create'], post: ['tradein.create'], put: ['tradein.create'], delete: ['tradein.create'] },
     // Customers
     customers: { get: ['customer.view'], post: ['customer.create'], put: ['customer.edit'], delete: ['user.manage'] },
     // Accounts / statements

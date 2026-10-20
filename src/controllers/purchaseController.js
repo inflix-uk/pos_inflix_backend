@@ -1838,10 +1838,16 @@ async function syncSalePriceToSameVariant(purchase) {
     }
 }
 
-// @desc    Create purchase
-// @route   POST /api/purchases
-// @access  Private (admin, manager)
-exports.createPurchase = asyncHandler(async (req, res) => {
+/**
+ * Create a purchase from req.body and put its units in stock. Shared by POST /api/purchases and
+ * trade-in completion, so both go through the same checks, SIDs, serial index, ledger and caches.
+ * Returns { status, body } for the HTTP reply; on success also { purchase, populated }.
+ * @param {object} [opts]
+ * @param {string} [opts.initialPaymentMethod] - ledger paymentMethod for the initial payment line (default 'bank')
+ * @param {string} [opts.initialPaymentNote] - ledger note for the initial payment line (default 'Initial payment')
+ * @param {boolean} [opts.markFullyPaid] - book the purchase as paid in full (paid = grand total)
+ */
+async function createPurchaseRecord(req, opts = {}) {
     const tenantId = getTenantIdFromReq(req);
     if (req.body.tenantId !== undefined) delete req.body.tenantId;
     req.body.tenantId = tenantId;
@@ -1857,10 +1863,10 @@ exports.createPurchase = asyncHandler(async (req, res) => {
 
     // Require either account or supplier
     if (!req.body.account && !req.body.supplier) {
-        return res.status(400).json({
-            success: false,
-            message: 'Kindly add a supplier first'
-        });
+        return {
+            status: 400,
+            body: { success: false, message: 'Kindly add a supplier first' }
+        };
     }
 
     // Require purchase price and sale price on every item
@@ -1870,16 +1876,16 @@ exports.createPurchase = asyncHandler(async (req, res) => {
             const pp = Number(it.purchasePrice);
             const sp = Number(it.salePrice);
             if (pp == null || pp <= 0 || Number.isNaN(pp)) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Item ${i + 1}: Purchase price is required and must be greater than 0.`
-                });
+                return {
+                    status: 400,
+                    body: { success: false, message: `Item ${i + 1}: Purchase price is required and must be greater than 0.` }
+                };
             }
             if (sp == null || sp <= 0 || Number.isNaN(sp)) {
-                return res.status(400).json({
-                    success: false,
-                    message: `Item ${i + 1}: Sale price is required and must be greater than 0.`
-                });
+                return {
+                    status: 400,
+                    body: { success: false, message: `Item ${i + 1}: Sale price is required and must be greater than 0.` }
+                };
             }
         }
     }
@@ -1889,13 +1895,17 @@ exports.createPurchase = asyncHandler(async (req, res) => {
         req.body.items = dedupeOtherItemsByBarcodeKeepingFirst(req.body.items);
         recomputePurchaseAggregatesFromItems(req.body);
     }
+    if (opts.markFullyPaid) {
+        req.body.paid = Number(req.body.grandTotal) || 0;
+        req.body.paymentStatus = 'Paid';
+    }
 
     const uniqueness = await validateUniqueBarcodeAndImei(req.body.items, undefined, tenantId);
     if (!uniqueness.valid) {
-        return res.status(400).json({
-            success: false,
-            message: uniqueness.message
-        });
+        return {
+            status: 400,
+            body: { success: false, message: uniqueness.message }
+        };
     }
 
     // Auto-generate a unique SID per individual IMEI (one SID per unit), stored in item.imeiSerials.
@@ -1987,8 +1997,8 @@ exports.createPurchase = asyncHandler(async (req, res) => {
                 referenceId: purchase._id,
                 referenceLabel: purchase.purchaseNumber || `PUR-${purchase._id}`,
                 date: new Date(),
-                paymentMethod: 'bank',
-                note: 'Initial payment',
+                paymentMethod: opts.initialPaymentMethod || 'bank',
+                note: opts.initialPaymentNote || 'Initial payment',
                 createdBy: req.user?.id
             });
         }
@@ -2028,10 +2038,21 @@ exports.createPurchase = asyncHandler(async (req, res) => {
     // Populate the StockItem index for the new purchase (denormalized read model).
     stockItemService.rebuildForPurchase(populated).catch(() => {});
 
-    res.status(201).json({
-        success: true,
-        data
-    });
+    return {
+        status: 201,
+        body: { success: true, data },
+        purchase,
+        populated
+    };
+}
+exports.createPurchaseRecord = createPurchaseRecord;
+
+// @desc    Create purchase
+// @route   POST /api/purchases
+// @access  Private (admin, manager)
+exports.createPurchase = asyncHandler(async (req, res) => {
+    const result = await createPurchaseRecord(req);
+    res.status(result.status).json(result.body);
 });
 
 /** The supplier statement dates a purchase by its ledger line (written at create), so move it with the purchase date. */

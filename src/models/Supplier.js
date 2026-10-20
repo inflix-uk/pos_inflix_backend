@@ -36,6 +36,11 @@ const supplierSchema = new mongoose.Schema({
     isActive: {
         type: Boolean,
         default: true
+    },
+    /** The system "Trade-in" account that every completed trade-in purchase is booked under. */
+    isTradeIn: {
+        type: Boolean,
+        default: false
     }
 }, {
     timestamps: true
@@ -44,5 +49,7 @@ const supplierSchema = new mongoose.Schema({
 // Used by getSuppliers (list page + create-sales account dropdown).
 supplierSchema.index({ isActive: 1, createdAt: -1 });
 supplierSchema.index({ name: 1 });
+// At most one Trade-in account per tenant.
+supplierSchema.index({ isTradeIn: 1 }, { unique: true, partialFilterExpression: { isTradeIn: true } });
 
 module.exports = require('../lib/tenantModel')('Supplier', supplierSchema);

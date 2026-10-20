@@ -114,6 +114,8 @@ function tenantActiveGate(req, res, next) {
     if (p === 'platform' || p.startsWith('platform/')) return next();
     if (p === 'platform-auth' || p.startsWith('platform-auth/')) return next();
     if (p === 'customer-portal' || p.startsWith('customer-portal/')) return next();
+    // Phone upload page for trade-in ID photos/signature: access is by QR token, not staff login.
+    if (p.startsWith('trade-in-upload/')) return next();
     protect(req, res, (err) => {
         if (err) return next(err);
         requireTenantActive(req, res, next);
@@ -173,5 +175,7 @@ router.use('/entitlements', entitlementsRoutes);
 router.use('/pricing-groups', pricingGroupRoutes);
 router.use('/customer-portal', customerPortalRoutes);
 router.use('/whatsapp', require('./whatsappRoutes'));
+router.use('/trade-ins', require('./tradeInRoutes'));
+router.use('/trade-in-upload', require('./tradeInUploadRoutes'));
 
 module.exports = router;

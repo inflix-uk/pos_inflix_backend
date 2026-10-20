@@ -28,7 +28,7 @@ const ENTITY_TYPES = [
     'Sale', 'SalesReturn', 'Payment', 'LedgerEntry', 'Product', 'Purchase', 'PurchaseReturn', 'Parcel',
     'Customer', 'Supplier', 'StockMove', 'Inventory', 'SerialHistory', 'Category', 'VariantAttribute', 'User', 'Role', 'Permission', 'Route', 'Other', 'Settings',
     'ExpenseCategory', 'Expense', 'StockTransfer', 'StockAdjustment',
-    'Tenant', 'TenantSubscription'
+    'Tenant', 'TenantSubscription', 'TradeIn'
 ];
 
 /**
