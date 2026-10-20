@@ -48,6 +48,7 @@ async function seedRolesOnConnection(conn, opts = {}) {
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
         'customer.view', 'customer.create', 'customer.edit', 'parcel.create', 'parcel.status_change',
         'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
+        'tradein.view', 'tradein.create',
         'settings.printing', 'settings.sales_mode'
     ];
     const staffPermIds = await getPermissionIdsByKeys(Permission, staffKeys);
@@ -61,6 +62,7 @@ async function seedRolesOnConnection(conn, opts = {}) {
     const warehouseKeys = [
         'product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change',
         'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
+        'tradein.view', 'tradein.create',
         'settings.printing'
     ];
     const warehousePermIds = await getPermissionIdsByKeys(Permission, warehouseKeys);

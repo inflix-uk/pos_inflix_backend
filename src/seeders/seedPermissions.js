@@ -67,6 +67,8 @@ const PERMISSIONS = [
     { key: 'repair.create', description: 'Create repair', group: 'Repairs' },
     { key: 'repair.edit', description: 'Edit repair', group: 'Repairs' },
     { key: 'repair.delete', description: 'Delete repair', group: 'Repairs' },
+    { key: 'tradein.view', description: 'View trade-ins', group: 'Trade-ins' },
+    { key: 'tradein.create', description: 'Create trade-ins (buy devices from customers into stock)', group: 'Trade-ins' },
     { key: 'expense_category.view', description: 'View expense categories', group: 'Expenses' },
     { key: 'expense_category.manage', description: 'Manage expense categories', group: 'Expenses' },
     { key: 'expense.view', description: 'View expenses', group: 'Expenses' },

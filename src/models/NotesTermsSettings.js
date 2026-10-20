@@ -137,6 +137,12 @@ Warranty void if the attempted to temper or disassembled
 
 Warranty void if damaged or broken`;
 
+const defaultTradeInTerms = `1. I confirm I am the legal owner of the device(s) listed and I have the right to sell them.
+2. The device(s) are not stolen, lost, blocked, or under any finance or contract agreement.
+3. I have removed my accounts (iCloud / Google), passcodes and personal data, or I agree that the shop may erase them.
+4. Once I have been paid, ownership of the device(s) passes to the shop and the sale is final.
+5. I agree that my details and ID may be kept as a record of this sale and shared with the police if requested.`;
+
 const notesTermsSettingsSchema = new mongoose.Schema({
     deliveryAddress: {
         type: String,
@@ -199,6 +205,13 @@ const notesTermsSettingsSchema = new mongoose.Schema({
         trim: true,
         maxlength: [5000, 'Business invoice terms cannot exceed 5000 characters'],
         default: ''
+    },
+    /** Shown to the customer on a trade-in (desktop + phone page); they tick Accept and sign. */
+    tradeInTerms: {
+        type: String,
+        trim: true,
+        maxlength: [5000, 'Trade-in terms cannot exceed 5000 characters'],
+        default: defaultTradeInTerms
     },
     /** Which A4 PDF layout is used when printing/downloading from sales (dispatch vs business). */
     a4InvoiceTemplate: {

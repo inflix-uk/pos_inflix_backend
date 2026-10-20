@@ -64,6 +64,8 @@ const PERMISSIONS = [
     { key: 'repair.create', description: 'Create repair', group: 'Repairs' },
     { key: 'repair.edit', description: 'Edit repair', group: 'Repairs' },
     { key: 'repair.delete', description: 'Delete repair', group: 'Repairs' },
+    { key: 'tradein.view', description: 'View trade-ins', group: 'Trade-ins' },
+    { key: 'tradein.create', description: 'Create trade-ins (buy devices from customers into stock)', group: 'Trade-ins' },
     { key: 'expense_category.view', description: 'View expense categories', group: 'Expenses' },
     { key: 'expense_category.manage', description: 'Manage expense categories', group: 'Expenses' },
     { key: 'expense.view', description: 'View expenses', group: 'Expenses' },
@@ -147,6 +149,29 @@ async function ensureSalesModePermissionOnRoles() {
     }
 }
 
+/**
+ * Trade-ins put stock in like a purchase, so when the trade-in permissions first appear in a tenant,
+ * give them to every role that can already add purchases/parcels. One-time only (caller checks),
+ * so an admin who later removes them from a role keeps that choice.
+ */
+async function grantTradeInPermissionsToPurchaseRoles() {
+    const perms = await Permission.find({ key: { $in: ['tradein.view', 'tradein.create', 'purchase.create', 'parcel.create'] } })
+        .select('_id key')
+        .lean();
+    const idOf = (k) => (perms.find((p) => p.key === k) || {})._id;
+    const tradeInIds = [idOf('tradein.view'), idOf('tradein.create')].filter(Boolean);
+    const purchaseIds = [idOf('purchase.create'), idOf('parcel.create')].filter(Boolean);
+    if (tradeInIds.length === 0 || purchaseIds.length === 0) return;
+    const result = await Role.updateMany(
+        { permissions: { $in: purchaseIds } },
+        { $addToSet: { permissions: { $each: tradeInIds } } }
+    );
+    if (result.modifiedCount > 0) {
+        const { invalidateAllPermissionCaches } = require('./rbacService');
+        invalidateAllPermissionCaches();
+    }
+}
+
 /** variant_attribute.create is admin-only by default (catalog + inline + Add on forms). */
 async function ensureVariantAttributeCreateOnAdminOnly() {
     const perm = await Permission.findOne({ key: 'variant_attribute.create' }).select('_id').lean();
@@ -174,6 +199,7 @@ async function ensureRoles() {
         'sale.view', 'sale.create', 'return.create', 'product.view', 'stock.view',
         'customer.view', 'customer.create', 'customer.edit', 'parcel.create', 'parcel.status_change',
         'repair.view', 'repair.create', 'repair.edit', 'repair.delete',
+        'tradein.view', 'tradein.create',
         'settings.printing', 'settings.sales_mode'
     ];
     const staffPermIds = await getPermissionIdsByKeys(staffKeys);
@@ -185,6 +211,7 @@ async function ensureRoles() {
     const warehouseKeys = [
         'product.view', 'stock.view', 'stock.receive', 'stock.adjust', 'parcel.create', 'parcel.status_change',
         'purchase.view', 'purchase.create', 'purchase.edit', 'purchase.return',
+        'tradein.view', 'tradein.create',
         'settings.printing'
     ];
     const warehousePermIds = await getPermissionIdsByKeys(warehouseKeys);
@@ -245,11 +272,13 @@ function ensure() {
     let promise = ensureByTenant.get(tenantKey);
     if (promise) return promise;
     promise = (async () => {
+        const hadTradeInPermission = await Permission.exists({ key: 'tradein.create' });
         const inserted = await ensurePermissions();
         await ensureRoles();
         await ensurePrintingPermissionOnRoles();
         await ensureSalesModePermissionOnRoles();
         await ensureVariantAttributeCreateOnAdminOnly();
+        if (!hadTradeInPermission) await grantTradeInPermissionsToPurchaseRoles();
         return { permissionsInserted: inserted };
     })().catch((err) => {
         ensureByTenant.delete(tenantKey);
@@ -266,5 +295,6 @@ module.exports = {
     ensurePrintingPermissionOnRoles,
     ensureSalesModePermissionOnRoles,
     ensureVariantAttributeCreateOnAdminOnly,
+    grantTradeInPermissionsToPurchaseRoles,
     PERMISSIONS
 };
