@@ -15,6 +15,14 @@ const formatTotal = (n) =>
     new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(n) || 0);
 
 /** base64 → PDF buffer, or null when it isn't a usable PDF. */
+// Same "Balance Due" as the A4 invoice: previous balance + this invoice - payments received.
+function balanceDue(doc) {
+    const p = doc.payments || {};
+    const received = (Number(p.cash) || 0) + (Number(p.card) || 0) + (Number(p.bank) || 0);
+    const due = (Number(doc.previousBalance) || 0) + (Number(doc.total) || 0) - (Number(doc.discount) || 0) - received;
+    return Math.max(0, Math.round(due * 100) / 100);
+}
+
 function decodePdf(pdfBase64, { requireHeader = false } = {}) {
     let buffer;
     try {
@@ -101,7 +109,7 @@ async function queuePdfForWhatsapp(req, res, doc) {
     const customer = doc.customerName || 'Customer';
     const safeFilename = String(filename || `invoice-${ref}.pdf`).replace(/[/\\]/g, '_').slice(0, 255);
     const caption = String(message || '').trim()
-        || `Invoice ${ref} for ${customer}. Total: ${formatTotal(doc.total)}.`;
+        || `Invoice ${ref} for ${customer}. Total: ${formatTotal(doc.total)}. Balance Due: ${formatTotal(balanceDue(doc))}.`;
 
     try {
         const out = await whatsappQueue.enqueueMessage({
