@@ -15,6 +15,7 @@ const {
     getStockViewRows,
     getFindInStockSerial,
     getFindInStockSerialsBatch,
+    getPurchaseItemTaxes,
     searchNonSerialProducts,
     searchSerialProducts,
     salesTypeahead
@@ -31,6 +32,8 @@ router.get('/stock-list', requirePermission('stock.view', 'purchase.view'), getS
 router.get('/stock-view-rows', requirePermission('stock.view', 'purchase.view'), getStockViewRows);
 router.get('/find-in-stock-serial/:serial', requirePermission('stock.view', 'purchase.view', 'purchase.return'), getFindInStockSerial);
 router.post('/find-in-stock-serials', requirePermission('stock.view', 'purchase.view', 'purchase.return'), getFindInStockSerialsBatch);
+// Read-only tax label (Marginal VAT / Normal VAT) for sale/invoice cart lines.
+router.post('/item-taxes', requirePermission('sale.create', 'invoice.create', 'purchase.view', 'stock.view'), getPurchaseItemTaxes);
 
 router.route('/')
     .get(requirePermission('purchase.view', 'sale.create'), getPurchases)
