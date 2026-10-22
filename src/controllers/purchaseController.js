@@ -703,6 +703,61 @@ exports.getFindInStockSerialsBatch = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, data: { results } });
 });
 
+// @desc    Tax option (Settings → Tax) chosen on the purchase, so sale screens can show "Marginal VAT" / "Normal VAT".
+//          Serial items are looked up by IMEI (a cart line can mix units from different purchases);
+//          non-serial items by their purchase line.
+// @route   POST /api/purchases/item-taxes  body: { items?: [{ purchaseId, purchaseItemId }], serials?: [string] }
+// @access  Private
+exports.getPurchaseItemTaxes = asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const isId = (v) => typeof v === 'string' && /^[a-f0-9]{24}$/i.test(v);
+    const wanted = (Array.isArray(body.items) ? body.items : [])
+        .filter((x) => x && isId(x.purchaseId) && isId(x.purchaseItemId))
+        .slice(0, 500);
+    const serials = [...new Set((Array.isArray(body.serials) ? body.serials : [])
+        .map((s) => String(s || '').trim())
+        .filter(Boolean))].slice(0, 500);
+    const tenantId = getTenantIdFromReq(req) || 'default';
+    const toTax = (t) => (t && typeof t === 'object' && t.name
+        ? { taxId: String(t._id), name: t.name, rate: Number(t.rate) || 0, type: t.type || 'percentage' }
+        : null);
+
+    const itemsOut = {};
+    if (wanted.length > 0) {
+        const itemIds = new Set(wanted.map((x) => x.purchaseItemId));
+        const purchases = await Purchase.find(
+            { _id: { $in: [...new Set(wanted.map((x) => x.purchaseId))] }, tenantId },
+            { 'items._id': 1, 'items.tax': 1 }
+        ).populate('items.tax', 'name rate type').lean();
+        for (const p of purchases) {
+            for (const it of p.items || []) {
+                const id = it._id ? String(it._id) : '';
+                if (id && itemIds.has(id)) itemsOut[id] = toTax(it.tax);
+            }
+        }
+    }
+
+    const serialsOut = {};
+    if (serials.length > 0) {
+        const wantedSerials = new Set(serials);
+        // Oldest first, so the latest purchase of a re-bought serial wins.
+        const purchases = await Purchase.find(
+            { tenantId, 'items.imeis': { $in: serials } },
+            { createdAt: 1, 'items.imeis': 1, 'items.tax': 1 }
+        ).sort({ createdAt: 1 }).populate('items.tax', 'name rate type').lean();
+        for (const p of purchases) {
+            for (const it of p.items || []) {
+                for (const imei of it.imeis || []) {
+                    const sn = String(imei).trim();
+                    if (wantedSerials.has(sn)) serialsOut[sn] = toTax(it.tax);
+                }
+            }
+        }
+    }
+
+    res.status(200).json({ success: true, data: { items: itemsOut, serials: serialsOut } });
+});
+
 
 /** Build variant key from purchase item (uses shared buildVariantKey; category may be populated). */
 function buildVariantKeyFromItem(item) {
@@ -974,6 +1029,7 @@ exports.getPurchases = asyncHandler(async (req, res) => {
         purchaseQuery
             .select('_id currency date items')
             .populate('items.category', 'name')
+            .populate('items.tax', 'name')
             .populate('items.sendTo', 'name type')
             .lean();
     } else {
