@@ -88,4 +88,69 @@ function buildStatementRows(entries, openingBalance, increasesAs) {
     };
 }
 
-module.exports = { parseStatementRange, dateMatchForRange, buildStatementRows, round2 };
+const serialsOf = (list) => (Array.isArray(list) ? list.filter(Boolean) : []);
+
+/** Invoice summary for a statement line: what was sold, at what price. */
+function saleDetails(sale) {
+    const items = (sale.items || []).map((it) => {
+        const quantity = Number(it.quantity) || 0;
+        const price = round2(it.price);
+        return {
+            name: it.name || it.sku || 'Item',
+            sku: it.sku || undefined,
+            quantity,
+            price,
+            total: round2(price * quantity),
+            serialNumbers: serialsOf(it.serialNumbers)
+        };
+    });
+    const discount = round2(sale.discount);
+    return {
+        kind: 'invoice',
+        reference: sale.reference || undefined,
+        date: sale.occurredAt || sale.createdAt || undefined,
+        status: sale.status || undefined,
+        items,
+        subtotal: round2(sale.total),
+        discount,
+        total: round2((Number(sale.total) || 0) - discount)
+    };
+}
+
+/** Return summary for a statement line: what came back, at what price. */
+function returnDetails(ret) {
+    const items = (ret.items || []).map((it) => ({
+        name: it.product || it.sku || 'Item',
+        sku: it.sku || undefined,
+        quantity: Number(it.quantity) || 0,
+        price: round2(it.netUnitPrice),
+        total: round2(it.subtotal),
+        serialNumbers: serialsOf(it.serialNumbers)
+    }));
+    return {
+        kind: 'return',
+        reference: ret.reference || undefined,
+        linkedInvoiceRef: ret.linkedInvoiceRef || undefined,
+        date: ret.date || ret.createdAt || undefined,
+        items,
+        subtotal: round2(ret.total),
+        discount: round2(ret.discount),
+        total: round2(ret.grandTotal)
+    };
+}
+
+/**
+ * Adds `details` (items sold or returned) to lines whose referenceId is a sale or a sales return.
+ * Lines with no matching document are left as they are.
+ */
+function attachLineDetails(lines, sales = [], returns = []) {
+    const byId = new Map();
+    for (const s of sales) byId.set(String(s._id), saleDetails(s));
+    for (const r of returns) byId.set(String(r._id), returnDetails(r));
+    return lines.map((line) => {
+        const details = line.referenceId ? byId.get(String(line.referenceId)) : null;
+        return details ? { ...line, details } : line;
+    });
+}
+
+module.exports = { parseStatementRange, dateMatchForRange, buildStatementRows, attachLineDetails, round2 };
