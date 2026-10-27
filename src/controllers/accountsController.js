@@ -22,7 +22,7 @@ const {
 } = require('../utils/salesDateAccess');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
-const { parseStatementRange, dateMatchForRange, buildStatementRows } = require('../utils/accountStatement');
+const { parseStatementRange, dateMatchForRange, buildStatementRows, attachLineDetails } = require('../utils/accountStatement');
 
 const ACCOUNTS_CACHE_NAMESPACES = ['accounts:list', 'accounts:statement'];
 async function invalidateAccountsCaches(tenantId) {
@@ -381,6 +381,21 @@ exports.getCustomerStatement = asyncHandler(async (req, res) => {
 
     const openingBalance = round2(priorEntries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
     const statement = buildStatementRows(entries, openingBalance, 'debit');
+
+    // Show what each invoice / return was for: items, qty, price.
+    const refIds = [...new Set(statement.lines.map((l) => l.referenceId).filter(Boolean).map(String))]
+        .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (refIds.length) {
+        const [sales, returns] = await Promise.all([
+            Sale.find({ _id: { $in: refIds } })
+                .select('reference items.name items.sku items.price items.quantity items.serialNumbers total discount status occurredAt createdAt')
+                .lean(),
+            SalesReturn.find({ _id: { $in: refIds } })
+                .select('reference linkedInvoiceRef items.product items.sku items.netUnitPrice items.quantity items.subtotal items.serialNumbers total discount grandTotal date createdAt')
+                .lean()
+        ]);
+        statement.lines = attachLineDetails(statement.lines, sales, returns);
+    }
 
     res.status(200).json({
         success: true,
