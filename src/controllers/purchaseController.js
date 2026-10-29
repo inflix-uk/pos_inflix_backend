@@ -16,6 +16,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const auditService = require('../services/auditService');
 const activityLogService = require('../services/activityLogService');
 const serialIndexService = require('../services/serialIndexService');
+const { serialLookupCandidates } = require('../utils/serialUtil');
 const stockItemService = require('../services/stockItemService');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const {
@@ -284,12 +285,24 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         return res.status(cached.status).json(cached.body);
     }
 
-    const respond = (status, body) => {
-        // Only cache positive/negative-stable answers (skip 4xx errors that depend on transient state)
-        if (status === 200 || status === 404) _fisSet(cacheKey, { status, body });
-        res.setHeader('Server-Timing', `total;dur=${Date.now() - t0}`);
-        return res.status(status).json(body);
-    };
+    // Try the serial as entered, then upper case, then without an Apple "S" prefix.
+    // Only a plain "not found" moves on to the next form; sold/returned answers stand.
+    let result = null;
+    for (const candidate of serialLookupCandidates(raw)) {
+        result = await findInStockSerialOne(candidate, tenantId, pricingGroupId);
+        if (result.status === 200 || result.notFound !== true) break;
+    }
+    if (!result) result = { status: 404, body: { success: false, message: 'Serial not found in inventory' } };
+
+    // Only cache positive/negative-stable answers (skip 4xx errors that depend on transient state)
+    if (result.status === 200 || result.status === 404) _fisSet(cacheKey, { status: result.status, body: result.body });
+    res.setHeader('Server-Timing', `total;dur=${Date.now() - t0}`);
+    return res.status(result.status).json(result.body);
+});
+
+/** One exact-serial lookup for getFindInStockSerial. Returns { status, body, notFound? }. */
+async function findInStockSerialOne(normalized, tenantId, pricingGroupId) {
+    const respond = (status, body) => ({ status, body });
 
     // Index + Redis first (same as batch endpoint). Legacy Purchase scan is expensive;
     // only run it on index miss, sold reconcile, or when group pricing needs full variant fields.
@@ -321,8 +334,17 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
         return !hasVariantMeta;
     };
 
+    // An index row can still say in_stock after the unit was sold (the sale's index write
+    // is fire-and-forget). Confirm against the sale records before offering it for sale;
+    // if it is sold, fall through to the legacy path, which answers "already sold" and
+    // repairs the index row.
+    let indexInStockButSold = false;
     if (indexOne?.status === 'in_stock' && indexOne.product && !pricingGroupId && !isIncompleteIndexProduct(indexOne.product)) {
-        return respond(200, { success: true, data: indexOne.product });
+        const activeSold = await findActiveSoldSerialsAmong([normalized]);
+        if (activeSold.length === 0) {
+            return respond(200, { success: true, data: indexOne.product });
+        }
+        indexInStockButSold = true;
     }
     // Index may still say returned after a re-purchase if cache lagged; only hard-block when
     // the serial is not currently on a live purchase.
@@ -334,6 +356,7 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
     }
 
     const needsLegacy =
+        indexInStockButSold ||
         !indexOne ||
         indexOne.status === 'not_found' ||
         indexOne.status === 'already_sold' ||
@@ -394,8 +417,8 @@ exports.getFindInStockSerial = asyncHandler(async (req, res) => {
             return respond(404, { success: false, message: 'Serial was returned to supplier and is not available to sell' });
         }
     }
-    return respond(404, { success: false, message: 'Serial not found in inventory' });
-});
+    return { status: 404, body: { success: false, message: 'Serial not found in inventory' }, notFound: true };
+}
 
 /**
  * Resolve selling price by barcode for a pricing group. Returns map barcode -> price.
@@ -632,18 +655,25 @@ exports.getFindInStockSerialsBatch = asyncHandler(async (req, res) => {
             (p.capacity && String(p.capacity).trim())
         );
     };
-    const reconcileSerials = results.filter((r) =>
+    // Index rows that say in_stock for a unit on an active sale are stale: send them through
+    // the legacy check too, so they come back "already sold" and the index row is repaired.
+    const indexInStock = results.filter((r) => r.status === 'in_stock').map((r) => r.serial);
+    const staleSold = new Set(
+        indexInStock.length > 0
+            ? (await findActiveSoldSerialsAmong(indexInStock)).map((d) => String(d.serialNumber).trim())
+            : []
+    );
+    const needsReconcile = (r) =>
         r.status === 'not_found' ||
         r.status === 'already_sold' ||
-        (r.status === 'in_stock' && indexProductIncomplete(r.product))
-    ).map((r) => r.serial);
+        (r.status === 'in_stock' && (indexProductIncomplete(r.product) || staleSold.has(r.serial)));
+    const reconcileSerials = results.filter(needsReconcile).map((r) => r.serial);
     if (reconcileSerials.length > 0) {
         const legacyResults = await legacyFindInStockSerials(reconcileSerials, tenantId);
         const bySerial = {};
         legacyResults.forEach((r) => { bySerial[r.serial] = r; });
         for (let i = 0; i < results.length; i++) {
-            const st = results[i].status;
-            if ((st === 'not_found' || st === 'already_sold' || (st === 'in_stock' && indexProductIncomplete(results[i].product))) && bySerial[results[i].serial]) {
+            if (needsReconcile(results[i]) && bySerial[results[i].serial]) {
                 const leg = bySerial[results[i].serial];
                 results[i] = leg;
                 serialIndexService.upsertFromResult(tenantId, leg).catch(() => {});
