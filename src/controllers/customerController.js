@@ -7,6 +7,7 @@ const asyncHandler = require('../middleware/asyncHandler');
 const { getTenantIdFromReq } = require('../middleware/auth');
 const cache = require('../lib/cache');
 const TTL = require('../lib/cacheTTL');
+const { normalizeCreditLimit, normalizeCreditAllowed } = require('../utils/customerCreditPolicy');
 
 const CUSTOMER_CACHE_NAMESPACES = ['customers:list', 'customers:walkIn'];
 async function invalidateCustomerCaches(tenantId) {
@@ -19,6 +20,18 @@ async function validatePricingGroupId(pricingGroupId, tenantId) {
     if (!mongoose.Types.ObjectId.isValid(pricingGroupId)) return 'Invalid pricing group';
     const group = await PricingGroup.findOne({ _id: pricingGroupId, tenantId }).select('_id').lean();
     if (!group) return 'Pricing group not found or does not belong to this store';
+    return null;
+}
+
+/** Normalise credit settings in a create/update body in place. Returns an error message or null. */
+function applyCreditSettings(body) {
+    const limit = normalizeCreditLimit(body.creditLimit);
+    if (limit === null) return 'Credit limit must be a number of 0 or more (0 = no limit)';
+    if (limit === undefined) delete body.creditLimit;
+    else body.creditLimit = limit;
+    const allowed = normalizeCreditAllowed(body.creditAllowed);
+    if (allowed === undefined) delete body.creditAllowed;
+    else body.creditAllowed = allowed;
     return null;
 }
 
@@ -226,7 +239,7 @@ exports.createCustomer = asyncHandler(async (req, res) => {
     const tenantId = getTenantIdFromReq(req);
     const body = { ...req.body };
     if (body.tenantId !== undefined) delete body.tenantId;
-    const err = await validatePricingGroupId(body.pricingGroupId, tenantId);
+    const err = (await validatePricingGroupId(body.pricingGroupId, tenantId)) || applyCreditSettings(body);
     if (err) {
         return res.status(400).json({ success: false, message: err });
     }
@@ -275,7 +288,7 @@ exports.updateCustomer = asyncHandler(async (req, res) => {
     }
     const body = { ...req.body };
     if (body.tenantId !== undefined) delete body.tenantId;
-    const err = await validatePricingGroupId(body.pricingGroupId, tenantId);
+    const err = (await validatePricingGroupId(body.pricingGroupId, tenantId)) || applyCreditSettings(body);
     if (err) {
         return res.status(400).json({ success: false, message: err });
     }

@@ -42,6 +42,8 @@ const {
     computeWholesaleTotalOwing,
     resolveWholesaleCheckoutAmounts,
 } = require('../utils/wholesalePaymentAmounts');
+const { evaluateCustomerCredit } = require('../utils/customerCreditPolicy');
+const mongoose = require('mongoose');
 
 const SALES_CACHE_NAMESPACES = ['sales:list', 'sales:soldSerials', 'purchases:stock-list'];
 async function invalidateSalesCaches(tenantId) {
@@ -1556,6 +1558,36 @@ exports.createSale = asyncHandler(async (req, res) => {
             } else {
                 saleData.customerId = walkIn._id;
                 saleData.customerName = walkIn.name;
+            }
+        }
+    }
+
+    // Per-customer credit rules: "credit not allowed" and maximum credit (limit).
+    if (saleData.type === 'wholesale' && saleData.customerId && mongoose.Types.ObjectId.isValid(String(saleData.customerId))) {
+        const creditCustomer = await Customer.findOne({ _id: saleData.customerId, tenantId })
+            .select('balance creditAllowed creditLimit isWalkIn name')
+            .lean();
+        if (creditCustomer) {
+            // Same balance change the sale transaction applies: sale net − paid now (cash/card/bank).
+            const balanceIncrease = round2(
+                (Number(saleData.total) || 0) - (Number(saleData.discount) || 0) -
+                (Number(saleData.payments?.cash) || 0) -
+                (Number(saleData.payments?.card) || 0) -
+                (Number(saleData.payments?.bank) || 0)
+            );
+            const creditCheck = evaluateCustomerCredit(creditCustomer, balanceIncrease);
+            if (!creditCheck.ok) {
+                return res.status(400).json({
+                    success: false,
+                    code: creditCheck.code,
+                    message: creditCheck.message,
+                    data: {
+                        creditLimit: creditCheck.creditLimit,
+                        currentBalance: creditCheck.currentBalance,
+                        newBalance: creditCheck.newBalance,
+                        availableCredit: creditCheck.availableCredit
+                    }
+                });
             }
         }
     }

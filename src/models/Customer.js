@@ -47,6 +47,17 @@ const customerSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    /** Whether this customer may buy on credit (leave part of a sale unpaid on account). */
+    creditAllowed: {
+        type: Boolean,
+        default: true
+    },
+    /** Maximum outstanding balance allowed on account. 0 = no limit. Only applies when creditAllowed. */
+    creditLimit: {
+        type: Number,
+        default: 0,
+        min: [0, 'Credit limit cannot be negative']
+    },
     isActive: {
         type: Boolean,
         default: true
