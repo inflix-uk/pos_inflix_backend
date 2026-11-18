@@ -6,7 +6,7 @@ const StockItem = require('../models/StockItem');
 const ProductGroupPrice = require('../models/ProductGroupPrice');
 const VariantGroupPrice = require('../models/VariantGroupPrice');
 const Category = require('../models/Category');
-const { buildVariantKey } = require('../utils/variantKeyUtils');
+const { buildVariantKey, buildNonSerialKey } = require('../utils/variantKeyUtils');
 const InventorySettings = require('../models/InventorySettings');
 const SoldSerial = require('../models/SoldSerial');
 const SerialHistory = require('../models/SerialHistory');
@@ -805,9 +805,23 @@ function buildVariantKeyFromItem(item) {
     );
 }
 
+/** True for items without IMEIs (accessories etc.). Accepts `isSerial` on flattened rows, else inspects the purchase item. */
+function isNonSerialItem(item) {
+    if (typeof item.isSerial === 'boolean') return !item.isSerial;
+    if (item.isOtherItem === true) return true;
+    return !(Array.isArray(item.imeis) && item.imeis.length > 0);
+}
+
+/** Non-serial rate-list key for a purchase item (barcode, else category + name). */
+function buildNonSerialKeyFromItem(item) {
+    const cat = item.category && typeof item.category === 'object' ? item.category.name : item.category;
+    return buildNonSerialKey(item.barcode, cat, item.name);
+}
+
 /**
  * Apply customer group pricing to purchase items when forSales and pricingGroupId are set.
- * Resolves price: (1) VariantGroupPrice by variantKey (category+grade+brand+model+capacity); (2) else ProductGroupPrice/Product.sellingPrice by barcode; (3) else item.salePrice.
+ * Resolves price: (0) non-serial items: VariantGroupPrice by non-serial key (barcode / category+name);
+ * (1) VariantGroupPrice by variantKey (category+grade+brand+model+capacity); (2) else ProductGroupPrice/Product.sellingPrice by barcode; (3) else item.salePrice.
  * Mutates data in place.
  */
 async function resolveGroupPricesForPurchases(data, tenantId, pricingGroupId) {
@@ -817,6 +831,10 @@ async function resolveGroupPricesForPurchases(data, tenantId, pricingGroupId) {
         (p.items || []).forEach((it) => {
             const key = buildVariantKeyFromItem(it);
             if (key) variantKeys.add(key);
+            if (isNonSerialItem(it)) {
+                const nsKey = buildNonSerialKeyFromItem(it);
+                if (nsKey) variantKeys.add(nsKey);
+            }
         });
     });
     let variantKeyToPrice = {};
@@ -852,6 +870,13 @@ async function resolveGroupPricesForPurchases(data, tenantId, pricingGroupId) {
     }
     data.forEach((p) => {
         (p.items || []).forEach((it) => {
+            if (isNonSerialItem(it)) {
+                const nsKey = buildNonSerialKeyFromItem(it);
+                if (nsKey && variantKeyToPrice[nsKey] != null) {
+                    it.salePrice = variantKeyToPrice[nsKey];
+                    return;
+                }
+            }
             const vk = buildVariantKeyFromItem(it);
             if (vk && variantKeyToPrice[vk] != null) {
                 it.salePrice = variantKeyToPrice[vk];
@@ -3088,6 +3113,7 @@ async function runStockItemTypeahead({
     // Customer-group pricing on the bounded result set only.
     if (pricingGroupId && rows.length > 0) {
         const wrapper = [{ items: rows.map((r) => ({
+            name: r.name, isSerial: r.isSerial,
             barcode: r.barcode, category: r.category, grade: r.grade,
             brand: r.brand, brandModel: r.brandModel, capacity: r.capacity,
             salePrice: r.salePrice, _row: r
@@ -3346,6 +3372,8 @@ exports.salesTypeahead = asyncHandler(async (req, res) => {
         const wrapper = [
             {
                 items: rows.map((r) => ({
+                    name: r.name,
+                    isSerial: r.isSerial,
                     barcode: r.barcode,
                     category: r.category,
                     grade: r.grade,
