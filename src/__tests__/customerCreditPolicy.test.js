@@ -37,8 +37,15 @@ describe('evaluateCustomerCredit', () => {
         expect(r.newBalance).toBe(5000.5);
     });
 
-    test('walk-in account is never blocked', () => {
-        expect(evaluateCustomerCredit({ isWalkIn: true, creditAllowed: false }, 100).ok).toBe(true);
+    test('walk-in account follows its own credit setting', () => {
+        // Walk-in with credit turned off (real case: balance £1,262 owed, £1 sale left on credit).
+        const blocked = evaluateCustomerCredit({ isWalkIn: true, balance: 1262, creditAllowed: false }, 1);
+        expect(blocked.ok).toBe(false);
+        expect(blocked.code).toBe('CREDIT_NOT_ALLOWED');
+        // Walk-in left on the default (credit allowed) is unchanged.
+        expect(evaluateCustomerCredit({ isWalkIn: true, balance: 1262 }, 1).ok).toBe(true);
+        // Fully paid walk-in sale is fine.
+        expect(evaluateCustomerCredit({ isWalkIn: true, balance: 1262, creditAllowed: false }, 0).ok).toBe(true);
     });
 });
 
