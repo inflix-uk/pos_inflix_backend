@@ -31,12 +31,14 @@ function normalizeCreditAllowed(value) {
 
 /**
  * Check a sale against the customer's credit settings.
- * @param {{ balance?: number, creditAllowed?: boolean, creditLimit?: number, isWalkIn?: boolean } | null} customer
+ * Applies to every account, including the shared Walk-in customer: when the shop turns credit off
+ * for Walk-in, unpaid walk-in sales are blocked too.
+ * @param {{ balance?: number, creditAllowed?: boolean, creditLimit?: number } | null} customer
  * @param {number} balanceIncrease  How much this sale adds to the account balance (sale net − paid now).
  * @returns {{ ok: true } | { ok: false, code: 'CREDIT_NOT_ALLOWED' | 'CREDIT_LIMIT_EXCEEDED', message: string, creditLimit?: number, currentBalance: number, newBalance: number, availableCredit?: number }}
  */
 function evaluateCustomerCredit(customer, balanceIncrease) {
-    if (!customer || customer.isWalkIn) return { ok: true };
+    if (!customer) return { ok: true };
     const increase = round2(balanceIncrease);
     if (increase <= EPSILON) return { ok: true };
 

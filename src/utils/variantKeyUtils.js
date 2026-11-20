@@ -40,7 +40,27 @@ function normalizeVariantKey(input) {
     return parts.length > 0 ? parts.join(' ').toUpperCase() : '';
 }
 
+/**
+ * Group-price key for non-serial (no IMEI) items, e.g. accessories.
+ * Must match frontend ProductsRateTable nonSerialKey():
+ * - barcode present → "NS:BC:<BARCODE>"
+ * - otherwise       → "NS:NM:<CATEGORY>|<NAME>"
+ * Each part trimmed, inner whitespace collapsed, uppercased. The "NS:" prefix
+ * keeps these keys apart from serial variant keys.
+ * @returns {string} '' when barcode, category and name are all empty
+ */
+function buildNonSerialKey(barcode, category, name) {
+    const clean = (s) => (s == null ? '' : String(s)).trim().split(/\s+/).filter(Boolean).join(' ').toUpperCase();
+    const bc = clean(barcode);
+    if (bc) return `NS:BC:${bc}`;
+    const cat = clean(category);
+    const nm = clean(name);
+    if (!cat && !nm) return '';
+    return `NS:NM:${cat}|${nm}`;
+}
+
 module.exports = {
     buildVariantKey,
-    normalizeVariantKey
+    normalizeVariantKey,
+    buildNonSerialKey
 };
